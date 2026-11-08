@@ -76,6 +76,23 @@ export function cameraMetrics(view) {
   return { azimuth: (Math.atan2(y, x) * 180 / Math.PI) || 0, elevation: (Math.atan2(z, horizontal) * 180 / Math.PI) || 0, distance, viewHeight };
 }
 
+// Angles describe the direction from the target to the camera in flight axes.
+export function cameraViewWithAngles(view,azimuth,elevation) {
+  if(!Number.isFinite(azimuth)||!Number.isFinite(elevation)||elevation < -90||elevation > 90)throw new Error('Enter finite angles with elevation between −90° and 90°.');
+  const distance=new THREE.Vector3().fromArray(view.position).distanceTo(new THREE.Vector3().fromArray(view.target));
+  if(distance<1e-6)throw new Error('Camera position and target must differ.');
+  const a=THREE.MathUtils.degToRad(azimuth),e=THREE.MathUtils.degToRad(elevation),horizontal=distance*Math.cos(e);
+  return {...view,position:[view.target[0]+horizontal*Math.cos(a),view.target[1]+distance*Math.sin(e),view.target[2]-horizontal*Math.sin(a)]};
+}
+
+// Preserve the complete camera view while retiming; never merge keyframes.
+export function moveCameraKey(keys,key,time,start,end) {
+  if(!keys.includes(key)||![time,start,end].every(Number.isFinite)||end<start)return false;
+  const target=THREE.MathUtils.clamp(Math.round(time*100)/100,start,end);
+  if(keys.some(other=>other!==key&&Math.abs(other.time-target)<.005))return false;
+  key.time=target;keys.sort((a,b)=>a.time-b.time);return true;
+}
+
 // Keep the graph continuous when azimuth crosses the -180° / +180° boundary.
 export function unwrapAngle(angle, reference) {
   return angle + 360 * Math.round((reference - angle) / 360);

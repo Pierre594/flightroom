@@ -80,3 +80,63 @@ test('custom video sizes are even and bounded',()=>{
   assert.equal(validDataFigureSize(999,800),false);assert.equal(validDataFigureSize(4000,800),false);
   assert.equal(validDataFigureSize(3840,3840),false);
 });
+
+test('time-anchored annotations stop at a selected plot position without jumping',()=>{
+  const item={x:0,start:3,end:20,anchor:{sourceId:'csv',time:5,offset:1,detachPercent:20}},series=[{sourceId:'csv'}];
+  const initial={left:0,right:10};
+  assert.equal(annotationPosition(item,8,{left:3,right:13},series,initial),.3);
+  assert.equal(annotationPosition(item,9,{left:4,right:14},series,initial),.2);
+  assert.equal(annotationPosition(item,19,{left:14,right:24},series,initial),.2);
+  assert.equal(annotationPosition(item,21,{left:14,right:24},series,initial),null);
+  assert.equal(annotationPosition(item,19,{left:14,right:24},[],initial),null);
+  assert.equal(annotationPosition({...item,anchor:{...item.anchor,detachPercent:80}},9,{left:4,right:14},series,initial),.6);
+  assert.equal(annotationPosition(item,19,{left:14,right:24},series,{left:7,right:17}),null);
+  assert.equal(annotationPosition({...item,anchor:{...item.anchor,detachPercent:0}},19,{left:14,right:24},series,initial),0);
+});
+
+test('fixed annotations attach without jumping, then follow the window and can detach',()=>{
+  const item={x:60,start:2,end:20,anchor:{sourceId:'csv',time:10,offset:1,mode:'attach',detachPercent:30}},series=[{sourceId:'csv'}],initial={left:4,right:14};
+  const position=(time,left,source=series)=>annotationPosition(item,time,{left,right:left+10},source,initial);
+  assert.equal(position(1,0),null);
+  assert.equal(position(10,3),.6);
+  assert.equal(position(11,4),.6);
+  assert.equal(position(13,6),.4);
+  assert.equal(position(15,8),.3);
+  assert.equal(position(19,12),.3);
+  assert.equal(position(21,14),null);
+  assert.equal(position(10,3,[]),.6);
+  assert.equal(position(11,4,[]),null);
+  assert.equal(annotationPosition({...item,anchor:{...item.anchor,detachPercent:null}},19,{left:12,right:22},series,initial),null);
+});
+
+test('reattachment resumes scrolling from the stopped position and is deterministic when seeking',()=>{
+  const item={x:70,start:null,end:null,anchor:{sourceId:'csv',time:10,offset:0,mode:'attach',detachPercent:20,reattachTime:20}},series=[{sourceId:'csv'}],initial={left:3,right:13},reattach={left:13,right:23};
+  const position=(time,left,attachWindow=reattach)=>annotationPosition(item,time,{left,right:left+10},series,initial,attachWindow);
+  assert.equal(position(5,0),.7);
+  assert.equal(position(10,3),.7);
+  assert.equal(position(12,5),.5);
+  assert.equal(position(15,8),.2);
+  assert.equal(position(19,12),.2);
+  assert.equal(position(20,13),.2);
+  assert.equal(position(21,14),.1);
+  assert.equal(position(22,15),0);
+  assert.equal(position(23,16),null);
+  assert.equal(position(12,5),.5);
+  // If window settings change so the stop was not yet reached at reattach,
+  // do not jump to the stop prematurely.
+  assert.equal(position(20,5,{left:5,right:15}),.5);
+});
+
+test('CSV timestamp annotations detach and reattach from their actual timestamp position',()=>{
+  const item={x:10,start:null,end:null,anchor:{sourceId:'csv',time:9,offset:1,detachPercent:20,reattachTime:20}},series=[{sourceId:'csv'}],initial={left:3,right:13},reattach={left:13,right:23};
+  const position=(time,left)=>annotationPosition(item,time,{left,right:left+10},series,initial,reattach);
+  assert.equal(position(9,2),null);
+  assert.equal(position(10,3),.7);
+  assert.equal(position(12,5),.5);
+  assert.equal(position(15,8),.2);
+  assert.equal(position(19,12),.2);
+  assert.equal(position(20,13),.2);
+  assert.equal(position(21,14),.1);
+  assert.equal(position(23,16),null);
+  assert.equal(position(12,5),.5);
+});

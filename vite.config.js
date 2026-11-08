@@ -6,6 +6,7 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { validDataFigureSize } from './src/data-layout.js';
+import {createProjectMiddleware} from './project-storage-server.js';
 
 // Local, token-addressed FFmpeg export. No user-supplied paths or shell commands.
 function localMp4Export() {
@@ -73,4 +74,5 @@ function localMp4Export() {
   };
   return {name:'flightroom-local-mp4',configureServer(server){server.middlewares.use(middleware);server.httpServer?.once('close',()=>{for(const id of sessions.keys())void clearSession(id);});},configurePreviewServer(server){server.middlewares.use(middleware);server.httpServer?.once('close',()=>{for(const id of sessions.keys())void clearSession(id);});}};
 }
-export default defineConfig({plugins:[localMp4Export()]});
+function localProjects(){return {name:'flightroom-local-projects',configureServer(server){server.middlewares.use(createProjectMiddleware(server.config.root));},configurePreviewServer(server){server.middlewares.use(createProjectMiddleware(server.config.root));}};}
+export default defineConfig({plugins:[localProjects(),localMp4Export()]});

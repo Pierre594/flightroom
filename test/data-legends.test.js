@@ -57,3 +57,84 @@ test('an above-plot legend reserves room below the title and lays entries side b
   assert.equal(boxes.length,0);assert.equal(labels[0].y,labels[1].y);assert.equal(labels[1].y,labels[2].y);
   assert.ok(labels[0].x<labels[1].x&&labels[1].x<labels[2].x);assert.ok(labels.every(label=>label.y>layout.outsideLegend.top&&label.y<layout.plot.top));
 });
+
+test('rendering at a different time recomputes automatic ranges for video frames',()=>{
+  const labels=[];const context=new Proxy({measureText:text=>({width:text.length*8}),fillText:(text,x)=>labels.push({text,x})},{get:(target,key)=>target[key]??(()=>{})});
+  const series=[{plotId:'a',label:'A',times:[0,10,20],values:[0,100,0],visible:true,color:'#aa0000',style:'solid',width:2}];
+  const state={plots:[{id:'a',width:100,height:100,yRangeMode:'auto',yMargin:10}],layout:'vertical',series,start:0,end:20,windowSeconds:5,threshold:.7,figureWidth:1280,backgroundColor:'#ffffff',backgroundOpacity:1,plotRanges:{a:{min:-500,max:500}},fullRanges:{a:{min:-10,max:110}}};
+  const canvas={width:1280,height:720,getContext:()=>context};
+  drawDataChart(canvas,state,2);assert.equal(labels.find(label=>label.x===104).text,'22');labels.length=0;
+  drawDataChart(canvas,state,12);assert.equal(labels.find(label=>label.x===104).text,'102');
+});
+
+test('anchored text and lines stop at their chosen subplot position, including when seeking',()=>{
+  let textX,lineX;const context=new Proxy({measureText:text=>({width:text.length*8})},{get:(target,key)=>{
+    if(key==='fillText')return (text,x)=>{if(text==='Pinned')textX=x;};
+    if(key==='moveTo')return (x)=>{if(target.strokeStyle==='#123456')lineX=x;};
+    return target[key]??(()=>{});
+  }});
+  const anchor={sourceId:'csv',time:8,offset:1,detachPercent:30};
+  const state={plots:[{id:'a',width:100,height:100}],layout:'vertical',series:[{sourceId:'csv',plotId:'a',label:'A',times:[0,30],values:[0,1],visible:true,color:'#eeeeee',style:'solid',width:2}],start:0,end:30,windowSeconds:10,threshold:.7,figureWidth:1280,backgroundColor:'#ffffff',backgroundOpacity:1,texts:[{type:'text',text:'Pinned',plotId:'a',anchor,start:null,end:20,y:20,size:20,color:'#123456'},{type:'line',plotId:'a',anchor,start:null,end:20,width:2,style:'solid',color:'#123456'}]};
+  const canvas={width:1280,height:720,getContext:()=>context};
+  const render=time=>{textX=undefined;lineX=undefined;drawDataChart(canvas,state,time);return [textX,lineX];};
+  const before=render(8);assert.ok(Number.isFinite(before[0]));assert.equal(before[1],undefined);
+  const initial=render(10),frozen=render(13);assert.ok(initial[0]>frozen[0]);assert.equal(frozen[0],frozen[1]);
+  assert.deepEqual(render(17),frozen);assert.deepEqual(render(13),frozen);assert.deepEqual(render(10),initial);
+  assert.deepEqual(render(21),[undefined,undefined]);
+  state.texts.forEach(item=>{item.anchor={...item.anchor,detachPercent:null};});assert.deepEqual(render(17),[undefined,undefined]);
+});
+
+test('fixed text and lines attach smoothly and detach during playback and seeking',()=>{
+  let textX,lineX;const context=new Proxy({measureText:text=>({width:text.length*8})},{get:(target,key)=>{
+    if(key==='fillText')return (text,x)=>{if(text==='Attached')textX=x;};
+    if(key==='moveTo')return x=>{if(target.strokeStyle==='#123456')lineX=x;};
+    return target[key]??(()=>{});
+  }});
+  const anchor={sourceId:'csv',time:10,offset:0,mode:'attach',detachPercent:20};
+  const state={plots:[{id:'a',width:100,height:100,legend:{visible:false}}],layout:'vertical',series:[{sourceId:'csv',plotId:'a',label:'A',times:[0,30],values:[0,1],visible:true,color:'#eeeeee',style:'solid',width:2}],start:0,end:30,windowSeconds:10,threshold:.7,figureWidth:1280,backgroundColor:'#ffffff',backgroundOpacity:1,texts:[{type:'text',text:'Attached',plotId:'a',x:70,anchor,start:null,end:null,y:20,size:20,color:'#123456'},{type:'line',plotId:'a',x:70,anchor,start:null,end:null,width:2,style:'solid',color:'#123456'}]};
+  const canvas={width:1280,height:720,getContext:()=>context};
+  const render=time=>{textX=undefined;lineX=undefined;drawDataChart(canvas,state,time);return [textX,lineX];};
+  const fixed=render(5);assert.equal(fixed[0],fixed[1]);assert.deepEqual(render(10),fixed);
+  const moving=render(12);assert.ok(moving[0]<fixed[0]);assert.equal(moving[0],moving[1]);
+  const stopped=render(15);assert.ok(stopped[0]<moving[0]);assert.deepEqual(render(20),stopped);assert.deepEqual(render(12),moving);assert.deepEqual(render(5),fixed);
+});
+
+test('text and line reattach after a pause without jumping and move again on seek',()=>{
+  let textX,lineX;const context=new Proxy({measureText:text=>({width:text.length*8})},{get:(target,key)=>{
+    if(key==='fillText')return (text,x)=>{if(text==='Resume')textX=x;};
+    if(key==='moveTo')return x=>{if(target.strokeStyle==='#123456')lineX=x;};
+    return target[key]??(()=>{});
+  }});
+  const anchor={sourceId:'csv',time:10,offset:0,mode:'attach',detachPercent:20,reattachTime:20};
+  const state={plots:[{id:'a',width:100,height:100,legend:{visible:false}}],layout:'vertical',series:[{sourceId:'csv',plotId:'a',label:'A',times:[0,40],values:[0,1],visible:true,color:'#eeeeee',style:'solid',width:2}],start:0,end:40,windowSeconds:10,threshold:.7,figureWidth:1280,backgroundColor:'#ffffff',backgroundOpacity:1,texts:[{type:'text',text:'Resume',plotId:'a',x:70,anchor,start:null,end:null,y:20,size:20,color:'#123456'},{type:'line',plotId:'a',x:70,anchor,start:null,end:null,width:2,style:'solid',color:'#123456'}]};
+  const canvas={width:1280,height:720,getContext:()=>context};
+  const render=time=>{textX=undefined;lineX=undefined;drawDataChart(canvas,state,time);return [textX,lineX];};
+  const fixed=render(5);assert.deepEqual(render(10),fixed);
+  assert.ok(render(12)[0]<fixed[0]);const stopped=render(15);assert.deepEqual(render(19),stopped);assert.deepEqual(render(20),stopped);
+  const moving=render(21);assert.ok(moving[0]<stopped[0]);assert.equal(moving[0],moving[1]);assert.deepEqual(render(23),[undefined,undefined]);assert.deepEqual(render(19),stopped);
+});
+
+test('timestamp-anchored text and lines resume after reattachment',()=>{
+  let textX,lineX;const context=new Proxy({measureText:text=>({width:text.length*8})},{get:(target,key)=>{
+    if(key==='fillText')return (text,x)=>{if(text==='Resume timestamp')textX=x;};
+    if(key==='moveTo')return x=>{if(target.strokeStyle==='#123456')lineX=x;};
+    return target[key]??(()=>{});
+  }});
+  const anchor={sourceId:'csv',time:9,offset:1,detachPercent:20,reattachTime:20};
+  const state={plots:[{id:'a',width:100,height:100,legend:{visible:false}}],layout:'vertical',series:[{sourceId:'csv',plotId:'a',label:'A',times:[0,40],values:[0,1],visible:true,color:'#eeeeee',style:'solid',width:2}],start:0,end:40,windowSeconds:10,threshold:.7,figureWidth:1280,backgroundColor:'#ffffff',backgroundOpacity:1,texts:[{type:'text',text:'Resume timestamp',plotId:'a',x:10,anchor,start:null,end:null,y:20,size:20,color:'#123456'},{type:'line',plotId:'a',x:10,anchor,start:null,end:null,width:2,style:'solid',color:'#123456'}]};
+  const canvas={width:1280,height:720,getContext:()=>context},render=time=>{textX=undefined;lineX=undefined;drawDataChart(canvas,state,time);return [textX,lineX];};
+  const before=render(9);assert.ok(Number.isFinite(before[0]));assert.equal(before[1],undefined);const first=render(10);assert.equal(first[0],first[1]);assert.ok(render(12)[0]<first[0]);
+  const stopped=render(15);assert.deepEqual(render(19),stopped);assert.deepEqual(render(20),stopped);const moving=render(21);assert.ok(moving[0]<stopped[0]);assert.equal(moving[0],moving[1]);assert.ok(Number.isFinite(render(23)[0]));assert.deepEqual(render(24),[undefined,undefined]);assert.deepEqual(render(19),stopped);
+});
+
+test('time axis uses two decimal places without changing vertical data formatting',()=>{
+  const labels=[];const context=new Proxy({measureText:text=>({width:text.length*8})},{get:(target,key)=>key==='fillText'?(text,x,y)=>labels.push({text,x,y,align:target.textAlign}):target[key]??(()=>{})});
+  const plot={id:'a',width:100,height:100,yRangeMode:'manual',yMin:0,yMax:1.234,legend:{visible:false}};
+  const state={plots:[plot],layout:'vertical',series:[],start:0,end:12.863,windowSeconds:12.863,threshold:.7,figureWidth:1280,backgroundColor:'#ffffff',backgroundOpacity:1};
+  const canvas={width:1280,height:720,getContext:()=>context},area=figureLayout(1280,720,[plot],'vertical')[0].plot;
+  drawDataChart(canvas,state,0);
+  assert.deepEqual(labels.filter(label=>label.y===area.bottom+15).map(label=>label.text),['00.00','02.57','05.15','07.72','10.29','12.86']);
+  assert.ok(labels.some(label=>label.align==='right'&&label.text==='1.234'));
+  labels.length=0;state.start=-.004;state.end=5.996;state.windowSeconds=6;drawDataChart(canvas,state,state.start);
+  assert.equal(labels.find(label=>label.y===area.bottom+15).text,'00.00');
+});

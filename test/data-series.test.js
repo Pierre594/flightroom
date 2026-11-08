@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parseDataCsv,dataWindow,dataRange} from '../src/data-series.js';
+import {parseDataCsv,dataWindow,dataRange,subplotRange,visibleSubplotRange} from '../src/data-series.js';
 
 test('data CSV imports multiple numeric columns and preserves gaps',()=>{
   const result=parseDataCsv('\uFEFFtime,Altitude,Speed\n1,2,3\n2,,4\n3,6,5','flight.csv');
@@ -31,4 +31,38 @@ test('window stops at the end so the final sample reaches the right edge',()=>{
 test('automatic vertical range ignores hidden series and gaps',()=>{
   assert.deepEqual(dataRange([{visible:true,values:[0,null,10]},{visible:false,values:[100]}]),{min:-1,max:11});
   assert.deepEqual(dataRange([]),{min:-1,max:1});
+});
+test('vertical margins use the whole visible data range and flat signals remain usable',()=>{
+  const values=[{visible:true,values:[-5,0,15,null]},{visible:true,values:[7,20]}];
+  assert.deepEqual(dataRange(values,0),{min:-5,max:20});
+  assert.deepEqual(dataRange(values,.2),{min:-10,max:25});
+  assert.deepEqual(dataRange([{visible:true,values:[0,0]}],0),{min:-1,max:1});
+  assert.deepEqual(dataRange([{visible:true,values:[-100,-100]}],.5),{min:-120,max:-80});
+  assert.deepEqual(subplotRange(values,{yRangeMode:'auto',yMargin:20}),{min:-10,max:25});
+  assert.deepEqual(subplotRange(values,{yRangeMode:'manual',yMargin:20,yMin:-30,yMax:40}),{min:-30,max:40});
+});
+test('automatic limits follow drawn data, interpolate window edges, and stay within full bounds',()=>{
+  const series=[{visible:true,times:[0,10,20],values:[0,100,0]}],plot={yRangeMode:'auto',yMargin:10},full=dataRange(series,.1);
+  assert.deepEqual(visibleSubplotRange(series,plot,{left:0,right:5},2,full),{min:-2,max:22});
+  assert.deepEqual(visibleSubplotRange(series,plot,{left:8.5,right:13.5},12,full),{min:78,max:102});
+  assert.deepEqual(visibleSubplotRange(series,plot,{left:16,right:21},19,full),{min:7,max:43});
+  assert.deepEqual(visibleSubplotRange(series,plot,{left:30,right:35},32,full),full);
+  assert.deepEqual(visibleSubplotRange(series,{...plot,yRangeMode:'manual',yMin:-5,yMax:7},{left:0,right:5},2,full),{min:-5,max:7});
+  const gaps=[{visible:true,times:[0,2,4],values:[1,null,100]}],gapFull=dataRange(gaps,.1);
+  assert.deepEqual(visibleSubplotRange(gaps,plot,{left:1,right:3},3,gapFull),gapFull);
+  const multiple=[...series,{visible:false,times:[0,10],values:[-999,999]}];
+  assert.deepEqual(visibleSubplotRange(multiple,plot,{left:0,right:5},2,full),{min:-2,max:22});
+});
+
+test('replacing a CSV preserves matching series across subplots and reconciles changed columns',async()=>{
+  const {replaceDataSource}=await import('../src/data-series.js');
+  const base={sourceId:'source',source:'old.csv',times:[0,1],values:[0,1],style:'solid',width:2,visible:true};
+  const old=[{...base,id:'a1',name:'A',label:'Custom label',plotId:'first',color:'#112233',style:'dashed',visible:false},{...base,id:'other',sourceId:'other',name:'Z',plotId:'first'},{...base,id:'b',name:'B',label:'B',plotId:'second',color:'#223344'},{...base,id:'a2',name:'A',label:'Second A',plotId:'second',color:'#334455'}];
+  const parsed=parseDataCsv('time,A,C,A\n0,3,4,5\n2,6,7,8\n','new.csv');
+  const result=replaceDataSource(old,'source',parsed,(column,index)=>({id:`new-${index}`,plotId:'first',label:column.name,color:'#abcdef',style:'solid',width:2.5,visible:true}));
+  assert.deepEqual([result.matched,result.added,result.removed],[2,1,1]);
+  assert.deepEqual(result.series.map(item=>item.id),['a1','other','a2','new-1']);
+  assert.deepEqual(result.series[0],{...old[0],source:'new.csv',times:[0,2],values:[3,6]});
+  assert.equal(result.series[2].plotId,'second');assert.equal(result.series[2].label,'Second A');assert.equal(result.series[3].plotId,'first');assert.equal(result.series[1],old[1]);
+  assert.equal(old[0].source,'old.csv');assert.throws(()=>replaceDataSource(old,'missing',parsed,()=>({})),/no longer present/);
 });

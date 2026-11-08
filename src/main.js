@@ -5,7 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { parseFlight, sampleFlight, reinterpretFlightAngles } from './flight.js';
 import { flightOrientation } from './orientation.js';
-import { sampleCamera, validCameraKeys, cameraMetrics, unwrapAngle, perspectiveCameraView, CAMERA_FOV_DEGREES } from './camera.js';
+import { sampleCamera, validCameraKeys, cameraMetrics, cameraViewWithAngles, moveCameraKey, unwrapAngle, perspectiveCameraView, CAMERA_FOV_DEGREES } from './camera.js';
 import { followPose, followRelativeView, followWorldView, validFollow } from './follow-camera.js';
 import { correctOnshapeColors } from './materials.js';
 import { addModelEdges } from './edges.js';
@@ -18,9 +18,12 @@ import { batchRigidOnshapeMeshes } from './batch-model.js';
 import { modelIdsFromAssets, readModelAssignment } from './model-assignments.js';
 import { orderCubeFiles, normalizeBackground } from './background.js';
 import { validAnnotations, annotationVisible, annotationScenePosition, makeAnnotationSprite } from './annotations.js';
+import {onMathLabelsReady, prepareMathLabels} from './math-labels.js';
 import { formatElapsedTime as clock } from './time.js';
 import { videoDimensions, videoFrameCount, videoFrameTiming } from './export-video.js';
 import { initDataPanel } from './data-panel.js';
+import {normalizeProjectName} from './project-names.js';
+import {saveProject,openProject,projectNameFromFile,setupProjectLibrary} from './project-storage.js';
 import Papa from 'papaparse';
 import './style.css';
 
@@ -207,7 +210,7 @@ function cameraViewAt(time) {
 function refreshFollowInputs() {
   const active=Boolean(followFlight());
   $('follow-offsets').hidden=!active;
-  $('follow-hint').textContent=active?'Orbit, pan or zoom to adjust. Camera keyframes resume when follow is off.':'Select a flight to follow its position and heading.';
+  $('follow-hint').textContent=active?'Left-drag orbits the flight; right-drag pans and scroll zooms. Keyframes resume when follow is off.':'Select a flight to follow its position and heading.';
   $('camera-graph-help').textContent=active?'Curves show the follow view over time; values show the current view.':'Curves show saved views; values show the current view. View height shows the zoom at the target.';
   if (!active) return;
   const position=state.follow.view.position;
@@ -240,6 +243,33 @@ function updateKeyframeSelection() {
 function jumpToKeyframe(key) {
   state.current = THREE.MathUtils.clamp(key.time, state.start, state.end); setPlaying(false); updateAtTime();
 }
+function enableKeyframeDrag(marker,key,jump) {
+  let drag=null,ignoreClick=false;
+  marker.addEventListener('pointerdown',event=>{
+    if(state.recording||event.button!==0)return;
+    event.preventDefault();event.stopPropagation();drag={pointerId:event.pointerId,startX:event.clientX,original:key.time,moved:false,blocked:false};marker.setPointerCapture(event.pointerId);
+  });
+  marker.addEventListener('pointermove',event=>{
+    if(!drag||drag.pointerId!==event.pointerId)return;
+    if(!drag.moved&&Math.abs(event.clientX-drag.startX)<4)return;
+    if(!drag.moved){drag.moved=true;if(state.playing)setPlaying(false);marker.classList.add('dragging');}
+    const bounds=$('keyframe-markers').getBoundingClientRect();if(!bounds.width)return;
+    const fraction=THREE.MathUtils.clamp((event.clientX-bounds.left)/bounds.width,0,1),time=state.start+fraction*(state.end-state.start);
+    drag.blocked=!moveCameraKey(state.cameraKeys,key,time,state.start,state.end);if(drag.blocked)return;
+    marker.style.left=`${(key.time-state.start)/(state.end-state.start)*100}%`;marker.title=`Camera keyframe at ${key.time.toFixed(2)} s`;jump.textContent=clock(key.time-state.start);
+    state.current=key.time;drawCameraGraph();updateAtTime();
+  });
+  const finish=(event,cancelled=false)=>{
+    if(!drag||drag.pointerId!==event.pointerId)return;const saved=drag;drag=null;
+    if(!saved.moved)return;
+    ignoreClick=true;
+    if(cancelled){key.time=saved.original;state.cameraKeys.sort((a,b)=>a.time-b.time);state.current=THREE.MathUtils.clamp(key.time,state.start,state.end);}
+    renderKeyframes();updateAtTime();
+    toast(cancelled?'Keyframe move cancelled.':saved.blocked?'A keyframe already exists at that time; kept the last valid position.':`Camera keyframe moved to ${clock(key.time-state.start)}.`);
+  };
+  marker.addEventListener('pointerup',event=>finish(event));marker.addEventListener('pointercancel',event=>finish(event,true));
+  marker.addEventListener('click',()=>{if(ignoreClick){ignoreClick=false;return;}jumpToKeyframe(key);});
+}
 function renderKeyframes() {
   const list = $('keyframe-list'), markers = $('keyframe-markers'); list.replaceChildren(); markers.replaceChildren();
   const count = state.cameraKeys.length; $('keyframe-count').textContent = `${count} view${count === 1 ? '' : 's'}`;
@@ -251,7 +281,7 @@ function renderKeyframes() {
     del.addEventListener('click', () => { state.cameraKeys.splice(i, 1); renderKeyframes(); applyCamera(); toast('Camera keyframe removed.'); });
     chip.append(jump, del); list.append(chip);
     if (key.time >= state.start && key.time <= state.end && state.end > state.start) {
-      const marker = document.createElement('button'); marker.className = 'keyframe-marker'; marker.style.left = `${(key.time-state.start)/(state.end-state.start)*100}%`; marker.title = jump.title; marker.setAttribute('aria-label', jump.title); marker.disabled = state.recording; marker.addEventListener('click', () => jumpToKeyframe(key)); markers.append(marker);
+      const marker = document.createElement('button'); marker.className = 'keyframe-marker'; marker.style.left = `${(key.time-state.start)/(state.end-state.start)*100}%`; marker.title = `${jump.title}; drag to move`; marker.setAttribute('aria-label', `${jump.title}; drag to move`); marker.disabled = state.recording; enableKeyframeDrag(marker,key,jump); markers.append(marker);
     }
   });
   updateKeyframeSelection();
@@ -348,9 +378,11 @@ function updateGraphCursor() {
     graph.dots[index].setAttribute('cx',x); graph.dots[index].setAttribute('cy',y);
   });
 }
-function updateCameraPosition() {
+function updateCameraPosition(force=false) {
   const values = [camera.position.x, -camera.position.z, camera.position.y];
   for (const [i,id] of ['camera-x','camera-y','camera-z'].entries()) $(id).textContent = (Math.abs(values[i]) < .005 ? 0 : values[i]).toFixed(2);
+  const angles=cameraMetrics(currentCameraView());
+  for(const [id,value] of [['camera-azimuth',angles.azimuth],['camera-elevation',angles.elevation]])if(force||document.activeElement!==$(id))$(id).value=(Math.abs(value)<.05?0:value).toFixed(1);
 }
 controls.addEventListener('change', () => {
   updateAxisLabelScale(); updateCameraPosition();
@@ -362,9 +394,20 @@ updateCameraPosition();
 $('follow-target').addEventListener('change',event=>{
   if (state.playing) setPlaying(false);
   const flight=state.flights.find(f=>f.id===event.target.value);
-  state.follow=flight ? {flightId:flight.id,view:followRelativeView(currentCameraView(),followPose(flight,state.current))} : null;
+  if(flight){const pose=followPose(flight,state.current),view=currentCameraView();view.target=pose.position.toArray();if(new THREE.Vector3().fromArray(view.position).distanceTo(pose.position)<1e-6)view.position=pose.position.clone().add(new THREE.Vector3(1,1,1)).toArray();state.follow={flightId:flight.id,view:followRelativeView(view,pose)};}
+  else state.follow=null;
   renderFollowControls();renderKeyframes();updateAtTime();
   toast(flight?`Following ${flight.name}. Adjust the view with the mouse or offset fields.`:'Follow camera off. Camera keyframes are active.');
+});
+renderer.domElement.addEventListener('pointerdown',event=>{
+  const flight=followFlight();if(!flight||state.recording||event.button!==0)return;
+  const target=followPose(flight,state.current).position;if(camera.position.distanceTo(target)<1e-6)return;
+  controls.target.copy(target);controls.update();
+},{capture:true});
+for(const id of ['camera-azimuth','camera-elevation'])$(id).addEventListener('change',()=>{
+  const azimuth=$('camera-azimuth').value.trim()===''?NaN:Number($('camera-azimuth').value),elevation=$('camera-elevation').value.trim()===''?NaN:Number($('camera-elevation').value);
+  try{const view=cameraViewWithAngles(currentCameraView(),azimuth,elevation);if(state.playing)setPlaying(false);camera.position.fromArray(view.position);controls.update();updateCameraPosition(true);}
+  catch(error){updateCameraPosition(true);toast(error.message,true);}
 });
 for (const id of ['follow-offset-x','follow-offset-y','follow-offset-z']) $(id).addEventListener('change',()=>{
   if (!followFlight()) return;
@@ -439,6 +482,7 @@ function rebuildAnnotations() {
   for(const annotation of state.annotations) { const sprite=makeAnnotationSprite(annotation); annotationSprites.set(annotation.id,sprite); annotationGroup.add(sprite); }
   lastAxisLabelScale=null; updateAxisLabelScale(); updateAnnotations();
 }
+onMathLabelsReady(()=>{if(!state.recording && state.annotations.some(annotation=>annotation.text.includes('$')))rebuildAnnotations();});
 function updateAnnotations() {
   const elapsed=state.current-state.start;
   annotationGroup.visible=$('show-annotations').checked;
@@ -709,31 +753,34 @@ $('csv-input').addEventListener('change',async e=>{
 });
 $('model-input').addEventListener('change',async e=>{ const file=e.target.files[0]; if (!file) return; modelsLoading++; try { await loadModel(await file.arrayBuffer(),file.name); toast('Default model loaded.'); } catch(err) { toast(`Could not load model: ${err.message}`,true); } finally { modelsLoading--; e.target.value=''; } });
 $('reset-samples').addEventListener('click',async()=>{ try { await loadSamples(); fitView(); toast('Example flight restored.'); } catch(err) { toast(err.message,true); } });
+let flightProjectBusy=false,flightProjectLibrary=null;
+function setFlightProjectBusy(busy){flightProjectBusy=busy;const disabled=busy||state.recording;for(const id of ['project-name','project-input','save-project','record'])$(id).disabled=disabled;flightProjectLibrary?.setLocked(disabled);}
 function lockRecording(locked) {
   state.recording=locked; controls.enabled=!locked;
   for(const id of ['tab-3d','tab-data']) $(id).disabled=locked;
   for (const handle of document.querySelectorAll('.viewport-resize-handle')) handle.disabled=locked;
-  for (const id of ['csv-angle-unit','play','restart','timeline','speed','fit-view','view-top','view-side','view-back','view-perspective','cable-from','cable-to','cable-length','add-cable','model-input','model-scale','csv-input','reset-samples','show-background','background-input','cube-input','sample-background','show-floor','show-grid','show-axes','show-axis-labels','axis-label-size','show-annotations','show-timestamp','annotation-text','annotation-attach','annotation-size','annotation-x','annotation-y','annotation-z','annotation-start','annotation-end','annotation-save','annotation-cancel','show-paths','show-edges','show-shadows','show-propellers','propeller-blur','propeller-rpm','frame-format','export-format','export-speed','export-resolution','export-fps','save-project','project-input','add-keyframe']) $(id).disabled=locked;
-  $('record').disabled=locked; setBackgroundBusy(backgroundLoading); renderList(); renderKeyframes(); if (!locked) resize();
+  for (const id of ['csv-angle-unit','play','restart','timeline','speed','fit-view','view-top','view-side','view-back','view-perspective','camera-azimuth','camera-elevation','cable-from','cable-to','cable-length','add-cable','model-input','model-scale','csv-input','reset-samples','show-background','background-input','cube-input','sample-background','show-floor','show-grid','show-axes','show-axis-labels','axis-label-size','show-annotations','show-timestamp','annotation-text','annotation-attach','annotation-size','annotation-x','annotation-y','annotation-z','annotation-start','annotation-end','annotation-save','annotation-cancel','show-paths','show-edges','show-shadows','show-propellers','propeller-blur','propeller-rpm','frame-format','export-format','export-speed','export-resolution','export-fps','save-project','project-input','add-keyframe']) $(id).disabled=locked;
+  setFlightProjectBusy(flightProjectBusy); setBackgroundBusy(backgroundLoading); renderList(); renderKeyframes(); if (!locked) resize();
 }
-function saveBlob(blob, name) { const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(url),60000); }
 $('save-project').addEventListener('click', async()=>{
+  if(flightProjectBusy||state.recording)return;
   if (modelsLoading || backgroundLoading) return toast('Wait for loading to finish before saving.',true);
   if (!state.modelBuffer) return toast('Load a model before saving the project.',true);
   try {
+    const name=normalizeProjectName($('project-name').value);setFlightProjectBusy(true);toast('Saving project…');
     const encoded=await new Promise((resolve,reject)=>{ const reader=new FileReader(); reader.onload=()=>resolve(reader.result); reader.onerror=()=>reject(reader.error); reader.readAsDataURL(new Blob([state.modelBuffer],{type:'model/gltf-binary'})); });
     const usedModels=[...new Set(state.flights.map(f=>f.modelId ?? 'default'))].filter(id=>id!=='default');
     const modelAssets=[]; for(const id of usedModels) { const asset=models.get(id); if(!asset) throw new Error('A flight model is unavailable.'); const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(new Blob([asset.buffer],{type:'model/gltf-binary'}));}); modelAssets.push({id,name:asset.name,data}); }
-    const project={ version:1, modelAssets, modelName:$('model-name').textContent, model:encoded, flights:state.flights.map(f=>({id:f.id,name:f.name,rows:f.rows,angleUnit:f.angleUnit ?? 'radians',modelId:f.modelId ?? 'default',modelScale:f.modelScale ?? 1})), cables:state.cables.map(({id,from,to,length,diameter})=>({id,from,to,length,diameter:diameter ?? DEFAULT_CABLE_DIAMETER})), camera:camera.position.toArray(), target:controls.target.toArray(), cameraZoom:camera.zoom, cameraProjection:camera.isOrthographicCamera ? 'orthographic' : 'perspective', cameraViewHeight:camera.isOrthographicCamera ? camera.top-camera.bottom : null, cameraKeys:state.cameraKeys, follow:state.follow, scale:Number($('model-scale').value), time:state.current, grid:$('show-grid').checked, axes:$('show-axes').checked, axisLabels:$('show-axis-labels').checked, axisLabelSize:Number($('axis-label-size').value), paths:$('show-paths').checked, edges:$('show-edges').checked, shadows:$('show-shadows').checked, showPropellers:$('show-propellers').checked, propellerBlur:$('propeller-blur').checked, propellerRpm:Number($('propeller-rpm').value), frameFormat:$('frame-format').value, csvAngleUnit:$('csv-angle-unit').value, exportFormat:$('export-format').value, exportSpeed:$('export-speed').value, exportResolution:Number($('export-resolution').value), exportFps:Number($('export-fps').value), floor:$('show-floor').checked, annotations:state.annotations, showAnnotations:$('show-annotations').checked, showTimestamp:$('show-timestamp').checked, background:backgroundAsset ? {kind:backgroundAsset.kind,name:backgroundAsset.name,...(backgroundAsset.kind==='cube'?{faces:backgroundAsset.faces}:{data:backgroundAsset.data}),visible:$('show-background').checked} : null };
-    saveBlob(new Blob([JSON.stringify(project)],{type:'application/json'}),'flightroom-project.json'); toast('Project saved with the model, flights, and camera views.');
+    const project={ type:'flightroom-3d',version:1, modelAssets, modelName:$('model-name').textContent, model:encoded, flights:state.flights.map(f=>({id:f.id,name:f.name,rows:f.rows,angleUnit:f.angleUnit ?? 'radians',modelId:f.modelId ?? 'default',modelScale:f.modelScale ?? 1})), cables:state.cables.map(({id,from,to,length,diameter})=>({id,from,to,length,diameter:diameter ?? DEFAULT_CABLE_DIAMETER})), camera:camera.position.toArray(), target:controls.target.toArray(), cameraZoom:camera.zoom, cameraProjection:camera.isOrthographicCamera ? 'orthographic' : 'perspective', cameraViewHeight:camera.isOrthographicCamera ? camera.top-camera.bottom : null, cameraKeys:state.cameraKeys, follow:state.follow, scale:Number($('model-scale').value), time:state.current, grid:$('show-grid').checked, axes:$('show-axes').checked, axisLabels:$('show-axis-labels').checked, axisLabelSize:Number($('axis-label-size').value), paths:$('show-paths').checked, edges:$('show-edges').checked, shadows:$('show-shadows').checked, showPropellers:$('show-propellers').checked, propellerBlur:$('propeller-blur').checked, propellerRpm:Number($('propeller-rpm').value), frameFormat:$('frame-format').value, csvAngleUnit:$('csv-angle-unit').value, exportFormat:$('export-format').value, exportSpeed:$('export-speed').value, exportResolution:Number($('export-resolution').value), exportFps:Number($('export-fps').value), floor:$('show-floor').checked, annotations:state.annotations, showAnnotations:$('show-annotations').checked, showTimestamp:$('show-timestamp').checked, background:backgroundAsset ? {kind:backgroundAsset.kind,name:backgroundAsset.name,...(backgroundAsset.kind==='cube'?{faces:backgroundAsset.faces}:{data:backgroundAsset.data}),visible:$('show-background').checked} : null };
+    $('project-name').value=await saveProject(name,project);toast(`Project saved to projects/${name}.json.`);
   } catch(err) { toast(`Could not save project: ${err.message}`,true); }
+  finally{setFlightProjectBusy(false);}
 });
-$('project-input').addEventListener('change',async e=>{
-  const file=e.target.files[0]; if (!file) return;
-  if (modelsLoading || backgroundLoading) { e.target.value=''; return toast('Wait for loading to finish before opening a project.',true); }
+async function loadFlightProject(file,selectedName){
+  if (modelsLoading || backgroundLoading) {toast('Wait for loading to finish before opening a project.',true);return;}
   try {
     const project=JSON.parse(await file.text());
-    if (project.version!==1 || !Array.isArray(project.flights) || typeof project.model!=='string' || !project.model.startsWith('data:model/gltf-binary;base64,') || ![project.camera,project.target].every(v=>Array.isArray(v)&&v.length===3&&v.every(Number.isFinite)) || !(Number(project.scale)>0)) throw new Error('Invalid or unsupported project file.');
+    if ((project.type!==undefined&&project.type!=='flightroom-3d') || project.version!==1 || !Array.isArray(project.flights) || typeof project.model!=='string' || !project.model.startsWith('data:model/gltf-binary;base64,') || ![project.camera,project.target].every(v=>Array.isArray(v)&&v.length===3&&v.every(Number.isFinite)) || !(Number(project.scale)>0)) throw new Error('Invalid or unsupported project file.');
     const modelAssets=project.modelAssets ?? [];
     const availableModels=modelIdsFromAssets(modelAssets);
     const flights=project.flights.map(f=>{
@@ -763,7 +810,7 @@ $('project-input').addEventListener('change',async e=>{
     state.follow=null; state.flights=flights; state.annotations=annotations.map(({id,text,x,y,z,start,end,size,flightId})=>({id,text,x,y,z,start,end,size:size ?? 1,flightId:flightId ?? null})); resetAnnotationForm(); rebuildAnnotations(); state.cables=cables.map(c=>({id:c.id,from:c.from,to:c.to,length:c.length,diameter:c.diameter ?? DEFAULT_CABLE_DIAMETER})); rebuildCables(); state.cameraKeys=keys; $('model-scale').value=project.scale;
     const previousBackground=backgroundAsset; backgroundAsset=importedBackground; $('show-background').checked=Boolean(project.background?.visible && importedBackground); applyBackground(); previousBackground?.texture.dispose();
     for(const [id,value] of [['show-floor',project.floor],['show-annotations',project.showAnnotations],['show-timestamp',project.showTimestamp],['show-grid',project.grid],['show-axes',project.axes],['show-axis-labels',project.axisLabels],['show-paths',project.paths],['show-edges',project.edges],['show-shadows',project.shadows],['show-propellers',project.showPropellers],['propeller-blur',project.propellerBlur]]) $(id).checked=value!==false;
-    $('axis-label-size').value=Number.isFinite(project.axisLabelSize) && project.axisLabelSize>=.2 && project.axisLabelSize<=2 ? project.axisLabelSize : 1; $('axis-label-size-value').textContent=`${Number($('axis-label-size').value).toFixed(1)}×`; updateAxisLabelScale();
+    $('axis-label-size').value=Number.isFinite(project.axisLabelSize) && project.axisLabelSize>=.2 && project.axisLabelSize<=2 ? project.axisLabelSize : Number($('axis-label-size').defaultValue); $('axis-label-size-value').textContent=`${Number($('axis-label-size').value).toFixed(1)}×`; updateAxisLabelScale();
     $('propeller-rpm').value=Number.isFinite(project.propellerRpm) && project.propellerRpm>=0 && project.propellerRpm<=10000 ? project.propellerRpm : 127;
     $('csv-angle-unit').value=project.csvAngleUnit==='degrees'?'degrees':'radians';
     setFrameFormat(project.frameFormat); $('export-format').value=project.exportFormat === 'webm' ? 'webm' : 'mp4'; $('export-speed').value=project.exportSpeed === 'quality' ? 'quality' : 'fast'; $('export-resolution').value=[540,720,1080].includes(project.exportResolution) ? String(project.exportResolution) : '1080'; $('export-fps').value=[15,24,30].includes(project.exportFps) ? String(project.exportFps) : '30'; updateExportSummary();
@@ -772,10 +819,12 @@ $('project-input').addEventListener('change',async e=>{
     const restoredView = perspectiveCameraView(savedView);
     switchProjection('perspective');
     camera.position.fromArray(restoredView.position); controls.target.fromArray(restoredView.target); camera.zoom=restoredView.zoom; camera.updateProjectionMatrix(); controls.update();
-    state.follow=project.follow ?? null; renderFollowControls(); renderKeyframes(); if(state.follow) updateAtTime(); toast(background?.legacy ? 'Project loaded. Its previous flat background is mapped as a panorama; replace it with a 360° image for best results.' : 'Project loaded.');
+    state.follow=project.follow ?? null; renderFollowControls(); renderKeyframes(); if(state.follow) updateAtTime();$('project-name').value=selectedName??projectNameFromFile(file,project.projectName);toast(background?.legacy ? 'Project loaded. Its previous flat background is mapped as a panorama; replace it with a 360° image for best results.' : 'Project loaded.');
   } catch(err) { toast(`Could not load project: ${err.message}`,true); }
-  e.target.value='';
-});
+}
+async function openFlightProject(file,name){if(flightProjectBusy||state.recording)return;setFlightProjectBusy(true);try{await loadFlightProject(file,name);}finally{setFlightProjectBusy(false);}}
+$('project-input').addEventListener('change',async e=>{const file=e.target.files[0];if(file)await openFlightProject(file);e.target.value='';});
+flightProjectLibrary=setupProjectLibrary({select:$('project-library'),button:$('open-saved-project'),type:'flightroom-3d',onOpen:async name=>{if(flightProjectBusy||state.recording)return;setFlightProjectBusy(true);try{await loadFlightProject(await openProject(name),name);}catch(error){toast(`Could not open project: ${error.message}`,true);}finally{setFlightProjectBusy(false);}}});
 let latestVideoObjectUrl = null;
 function exportFeedback(message,error=false) {
   const element=$('export-feedback'); element.hidden=false; element.textContent=message; element.classList.toggle('error',error);
@@ -864,6 +913,9 @@ $('record').addEventListener('click',async()=>{
   state.exportCancelled=false;state.offlineExport=true;setPlaying(false);lockRecording(true);
   $('cancel-export').hidden=false;$('cancel-export').disabled=false;$('download-video').hidden=true;$('playback-status').textContent='EXPORTING';exportProgress('Preparing video export…');
   try {
+    await prepareMathLabels(state.annotations.map(annotation=>annotation.text));
+    if(state.exportCancelled){exportFeedback('Export cancelled.');toast('Export cancelled.');return;}
+    rebuildAnnotations();
     renderer.setSize(width,outputHeight,false);resizeTimestamp();
     if(format==='mp4') {
       try {

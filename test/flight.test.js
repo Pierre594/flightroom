@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { parseFlight, sampleFlight, reinterpretFlightAngles } from '../src/flight.js';
 
 const radiansHeader='time,x_m,y_m,z_m,roll_rad,pitch_rad,yaw_rad\n';
+const currentHeader='time,position_x,position_y,position_z,roll_rad,pitch_rad,yaw_rad\n';
 const degreesHeader='time_s,x_m,y_m,z_m,roll_deg,pitch_deg,yaw_deg\n';
 test('sample flights use radians and are synchronized',async()=>{
   const one=parseFlight(await readFile('Drone1.csv','utf8'),'Drone1.csv');
@@ -11,6 +12,15 @@ test('sample flights use radians and are synchronized',async()=>{
   assert.equal(one.start,0);assert.equal(one.end,10);assert.equal(two.end,10);assert.equal(one.angleUnit,'radians');
   const sample=sampleFlight(one,.5);assert.equal(sample.alpha,.5);assert.equal(sample.a.z_m,0);assert.equal(sample.b.z_m,.5);
   assert.equal(two.rows.at(-1).x_m,1);assert.equal(two.rows.at(-1).y_m,1);assert.equal(two.rows.at(-1).z_m,1);
+});
+test('current position columns import identically to legacy flight CSVs',()=>{
+  const rows='0,1,2,3,0.1,0.2,0.3\n2,4,5,6,0.4,0.5,0.6';
+  const current=parseFlight(currentHeader+rows),legacy=parseFlight(radiansHeader+rows);
+  assert.deepEqual(current.rows,legacy.rows);
+  assert.deepEqual([current.rows[1].x_m,current.rows[1].y_m,current.rows[1].z_m],[4,5,6]);
+  assert.throws(()=>parseFlight('time,position_x,x_m,position_y,position_z,roll_rad,pitch_rad,yaw_rad\n0,1,1,2,3,0,0,0\n1,1,1,2,3,0,0,0'),/only one position column/);
+  assert.throws(()=>parseFlight('time,position_x,position_y,roll_rad,pitch_rad,yaw_rad\n0,0,0,0,0,0\n1,0,0,0,0,0'),/missing columns: position_z/);
+  assert.throws(()=>parseFlight(currentHeader+'0,1,2,3,0,0,0\n1,1,2,,0,0,0'),/empty position_z/);
 });
 test('radians stay in radians; explicitly selected degrees and old project data are converted',()=>{
   const rad=parseFlight(radiansHeader+'0,0,0,0,0,0,0\n1,0,0,1,0,0,1.5707963267948966');

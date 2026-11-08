@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { followPose, followRelativeView, followWorldView, validFollow } from '../src/follow-camera.js';
+import { cameraMetrics, cameraViewWithAngles } from '../src/camera.js';
 
 const row=(time,x,y,z,yaw,roll=0,pitch=0)=>({time,x_m:x,y_m:y,z_m:z,yaw_rad:yaw,roll_rad:roll,pitch_rad:pitch});
 const flight={start:0,end:2,rows:[row(0,0,0,0,0),row(2,2,1,1,Math.PI/2,1,.5)]};
@@ -29,4 +30,13 @@ test('saved follow views require an existing flight and a usable camera',()=>{
   assert.equal(validFollow({flightId:'missing',view},ids),false);
   assert.equal(validFollow({flightId:'a',view:{...view,position:view.target}},ids),false);
   assert.equal(validFollow({flightId:'a',view:{...view,zoom:NaN}},ids),false);
+});
+
+test('an edited orbit angle follows the flight heading and stays aimed at the object',()=>{
+  const base={position:[-2,1,0],target:[0,0,0],zoom:1,projection:'perspective'};
+  const initial=followRelativeView(base,followPose(flight,0));
+  const edited=cameraViewWithAngles(initial,60,25);
+  const world=followWorldView(edited,followPose(flight,2)),metrics=cameraMetrics(world);
+  close(world.target,followPose(flight,2).position.toArray());
+  assert.ok(Math.abs(metrics.azimuth-150)<1e-9);assert.ok(Math.abs(metrics.elevation-25)<1e-9);
 });

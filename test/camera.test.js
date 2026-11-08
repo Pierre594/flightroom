@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sampleCamera, validCameraKeys, cameraMetrics, unwrapAngle, perspectiveCameraView } from '../src/camera.js';
+import { sampleCamera, validCameraKeys, cameraMetrics, cameraViewWithAngles, moveCameraKey, unwrapAngle, perspectiveCameraView } from '../src/camera.js';
 const key = (time,position,target=[0,0,0],zoom=1) => ({time,position,target,zoom});
 
 test('no keyframes leaves the view unchanged; a single key holds for the entire flight', () => {
@@ -37,6 +37,21 @@ test('camera angles use the flight Z-up frame and zoom measures target distance'
   const up=cameraMetrics(key(0,[0,4,0])); assert.equal(up.elevation,90); assert.equal(up.distance,4);
   const translated=cameraMetrics(key(0,[3,2,-1],[1,0,-1]));
   assert.ok(Math.abs(translated.elevation-45)<1e-9); assert.ok(Math.abs(translated.distance-Math.sqrt(8))<1e-9);
+});
+
+test('editing camera angles rotates around the target while preserving distance and zoom',()=>{
+  const original={...key(0,[4,2,-1],[1,0,-1],2),projection:'perspective'};
+  const changed=cameraViewWithAngles(original,90,30),metrics=cameraMetrics(changed);
+  assert.ok(Math.abs(metrics.azimuth-90)<1e-9);assert.ok(Math.abs(metrics.elevation-30)<1e-9);
+  assert.ok(Math.abs(metrics.distance-cameraMetrics(original).distance)<1e-9);assert.deepEqual(changed.target,original.target);assert.equal(changed.zoom,2);
+  assert.throws(()=>cameraViewWithAngles(original,0,91),/elevation/);
+});
+
+test('moving a camera keyframe preserves its view, allows reordering and rejects collisions',()=>{
+  const first=key(1,[1,2,3]),middle=key(3,[4,5,6]),last=key(8,[7,8,9]),keys=[first,middle,last],view=JSON.stringify({...middle,time:0});
+  assert.ok(moveCameraKey(keys,middle,9,0,10));assert.deepEqual(keys.map(k=>k.time),[1,8,9]);assert.equal(JSON.stringify({...middle,time:0}),view);
+  assert.equal(moveCameraKey(keys,middle,8,0,10),false);assert.deepEqual(keys.map(k=>k.time),[1,8,9]);
+  assert.ok(moveCameraKey(keys,middle,-1,0,10));assert.deepEqual(keys.map(k=>k.time),[0,1,8]);assert.ok(validCameraKeys(keys));
 });
 
 test('azimuth graph unwraps smoothly across the 180 degree boundary', () => {

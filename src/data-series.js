@@ -27,6 +27,26 @@ export function parseDataCsv(text, name='Data.csv') {
   return {name,times,columns:names.map((column,i)=>({name:column,values:columns[i]}))};
 }
 
+// Replace one imported source across all subplots. Match duplicate column
+// names in order, so each existing curve keeps its own settings and subplot.
+export function replaceDataSource(series,sourceId,parsed,createSeries) {
+  const old=series.filter(item=>item.sourceId===sourceId);
+  if(!old.length)throw new Error('The CSV source is no longer present.');
+  const byName=new Map();for(const item of old){if(!byName.has(item.name))byName.set(item.name,[]);byName.get(item.name).push(item);}
+  let matched=0;const matchedSeries=new Map(),addedSeries=[];
+  parsed.columns.forEach((column,index)=>{
+    const existing=byName.get(column.name)?.shift();
+    const replacement={...(existing ?? createSeries(column,index)),sourceId,source:parsed.name,name:column.name,times:parsed.times,values:column.values};
+    if(existing){matched++;matchedSeries.set(existing,replacement);}else addedSeries.push(replacement);
+  });
+  const last=old.at(-1),updated=[];
+  for(const item of series){
+    if(item.sourceId!==sourceId)updated.push(item);else if(matchedSeries.has(item))updated.push(matchedSeries.get(item));
+    if(item===last)updated.push(...addedSeries);
+  }
+  return {series:updated,matched,added:addedSeries.length,removed:old.length-matched};
+}
+
 export function dataWindow(start, current, span, threshold, end=Infinity) {
   const hasEnd=Number.isFinite(end) && end>start;
   const width=hasEnd?Math.min(span,end-start):span;
@@ -35,10 +55,42 @@ export function dataWindow(start, current, span, threshold, end=Infinity) {
   return {left,right:left+width};
 }
 
-export function dataRange(series) {
+export function dataRange(series,margin=.1) {
   let min=Infinity,max=-Infinity;
   for(const item of series) if(item.visible) for(const value of item.values) if(value!==null) { min=Math.min(min,value);max=Math.max(max,value); }
+  return paddedRange(min,max,margin);
+}
+
+function paddedRange(min,max,margin) {
   if(!Number.isFinite(min)) return {min:-1,max:1};
-  const padding=max===min ? Math.max(Math.abs(min)*.1,1) : (max-min)*.1;
+  // A flat signal needs a non-zero reference span even with zero margin.
+  const padding=max===min ? Math.max(Math.abs(min)*.2,2)*(.5+margin) : (max-min)*margin;
   return {min:min-padding,max:max+padding};
+}
+
+export function subplotRange(series,plot) {
+  return plot.yRangeMode==='manual'?{min:plot.yMin,max:plot.yMax}:dataRange(series,(plot.yMargin ?? 10)/100);
+}
+
+function lowerBound(times,value) {
+  let lo=0,hi=times.length;while(lo<hi){const mid=(lo+hi)>>1;if(times[mid]<value)lo=mid+1;else hi=mid;}return lo;
+}
+
+// Match the part of each curve already drawn in the window, including linearly
+// interpolated values at its left edge and the playback cursor.
+export function visibleSubplotRange(series,plot,window,time,fullRange) {
+  if(plot.yRangeMode==='manual')return {min:plot.yMin,max:plot.yMax};
+  const margin=(plot.yMargin ?? 10)/100,full=fullRange ?? dataRange(series,margin),left=window.left,right=Math.min(window.right,time);
+  if(right<left)return full;
+  let min=Infinity,max=-Infinity;
+  const include=value=>{if(value!==null&&Number.isFinite(value)){min=Math.min(min,value);max=Math.max(max,value);}};
+  for(const item of series){
+    if(!item.visible)continue;const times=item.times,values=item.values;
+    if(!times?.length||right<times[0]||left>times.at(-1))continue;
+    const edge=value=>{const i=lowerBound(times,value);if(i>0&&i<times.length&&times[i]!==value&&values[i-1]!==null&&values[i]!==null){const f=(value-times[i-1])/(times[i]-times[i-1]);include(values[i-1]+f*(values[i]-values[i-1]));}};
+    edge(left);let i=lowerBound(times,left);for(;i<times.length&&times[i]<=right;i++)include(values[i]);edge(right);
+  }
+  if(!Number.isFinite(min))return full;
+  const visible=paddedRange(min,max,margin),bounded={min:Math.max(full.min,visible.min),max:Math.min(full.max,visible.max)};
+  return bounded.min<bounded.max?bounded:full;
 }

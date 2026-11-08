@@ -1,7 +1,8 @@
 import Papa from 'papaparse';
 
-export const COLUMNS = ['time','x_m','y_m','z_m','roll_rad','pitch_rad','yaw_rad'];
-const POSITION_COLUMNS = COLUMNS.slice(1,4);
+export const COLUMNS = ['time','position_x','position_y','position_z','roll_rad','pitch_rad','yaw_rad'];
+// Keep the internal coordinate keys used by saved projects and the 3D scene.
+const POSITION_COLUMNS = [['position_x','x_m'],['position_y','y_m'],['position_z','z_m']];
 const ANGLE_SETS = [
   {columns:['roll_rad','pitch_rad','yaw_rad'],unit:'radians'},
   {columns:['roll','pitch','yaw'],unit:'radians'},
@@ -16,7 +17,8 @@ export function parseFlight(text, name = 'CSV', options = {}) {
   const fields=result.meta.fields ?? [];
   if(fields.includes('time') && fields.includes('time_s')) throw new Error(`${name}: use only one time column (time or time_s).`);
   const timeColumn=fields.includes('time')?'time':fields.includes('time_s')?'time_s':null;
-  const missing=[...(timeColumn?[]:['time']),...POSITION_COLUMNS.filter(c=>!fields.includes(c))];
+  for(const [current,legacy] of POSITION_COLUMNS)if(fields.includes(current)&&fields.includes(legacy))throw new Error(`${name}: use only one position column for ${current} (${current} or ${legacy}).`);
+  const missing=[...(timeColumn?[]:['time']),...POSITION_COLUMNS.filter(([current,legacy])=>!fields.includes(current)&&!fields.includes(legacy)).map(([current])=>current)];
   if(missing.length) throw new Error(`${name}: missing columns: ${missing.join(', ')}`);
   const sets=ANGLE_SETS.filter(set=>set.columns.every(column=>fields.includes(column)));
   if(!sets.length) throw new Error(`${name}: missing angle columns; use roll_rad, pitch_rad, yaw_rad (or the legacy _deg names).`);
@@ -33,7 +35,7 @@ export function parseFlight(text, name = 'CSV', options = {}) {
   };
   let previousTime=-Infinity;
   const rows=result.data.map((raw,index)=>{
-    const row={time:readNumber(raw,timeColumn,index)};for(const key of POSITION_COLUMNS) row[key]=readNumber(raw,key,index);
+    const row={time:readNumber(raw,timeColumn,index)};for(const [current,legacy] of POSITION_COLUMNS) row[legacy]=readNumber(raw,fields.includes(current)?current:legacy,index);
     source.columns.forEach((key,i)=>{row[COLUMNS[i+4]]=readNumber(raw,key,index)*factor;});
     if(index && row.time<=previousTime) throw new Error(`${name}: timestamps must be strictly increasing.`);
     previousTime=row.time;

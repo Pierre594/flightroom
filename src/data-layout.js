@@ -55,14 +55,42 @@ export function dataTextVisible(item,time) {
   return (item.start===null||time>=item.start) && (item.end===null||time<=item.end);
 }
 
+// Whether the first attachment has reached its stop by the reattachment time.
+export function hasReachedDetach(item,initialWindow,reattachWindow) {
+  const anchor=item.anchor,width=initialWindow.right-initialWindow.left;
+  const bound=anchor.mode==='attach'?initialWindow.left+width*item.x/100:anchor.time+anchor.offset;
+  const initial=(bound-initialWindow.left)/width;
+  if(initial<0||initial>1)return false;
+  const stop=Math.min(initial,anchor.detachPercent/100);
+  return (bound-reattachWindow.left)/(reattachWindow.right-reattachWindow.left)<=stop+1e-10;
+}
+
 // Return a horizontal fraction within the plot, or null when not visible.
-export function annotationPosition(item,time,window,series) {
+export function annotationPosition(item,time,window,series,initialWindow=window,reattachWindow=window,{leftPadding=0,rightPadding=0,allowFuture=false}={}) {
   if(!dataTextVisible(item,time))return null;
   if(!item.anchor)return item.x/100;
-  if(!series.some(s=>s.sourceId===item.anchor.sourceId))return null;
   const anchorTime=item.anchor.time+item.anchor.offset;
-  if(time<anchorTime||anchorTime<window.left||anchorTime>window.right)return null;
-  return (anchorTime-window.left)/(window.right-window.left);
+  const attach=item.anchor.mode==='attach';
+  if(attach&&time<anchorTime)return item.x/100;
+  if(!series.some(s=>s.sourceId===item.anchor.sourceId))return null;
+  if(time<anchorTime&&!allowFuture)return null;
+  // At attachment, bind to the time-coordinate under the fixed position.
+  // This makes seeking deterministic and avoids a jump at the transition.
+  const boundTime=attach?initialWindow.left+(initialWindow.right-initialWindow.left)*item.x/100:anchorTime;
+  let position=(boundTime-window.left)/(window.right-window.left);
+  if(item.anchor.detachPercent!=null){
+    const initial=(boundTime-initialWindow.left)/(initialWindow.right-initialWindow.left);
+    if(initial<0||initial>1)return null;
+    // The window only moves leftward. If the requested stop is already to
+    // the right when the anchor appears, keep the initial position instead
+    // of jumping the annotation across the plot.
+    const stop=Math.min(initial,item.anchor.detachPercent/100);
+    if(item.anchor.reattachTime!=null&&time>=item.anchor.reattachTime&&hasReachedDetach(item,initialWindow,reattachWindow)){
+      const reattached=reattachWindow.left+(reattachWindow.right-reattachWindow.left)*stop;
+      position=(reattached-window.left)/(window.right-window.left);
+    }else position=Math.max(position,stop);
+  }
+  return position>=-leftPadding&&position<=1+rightPadding?position:null;
 }
 
 export function validDataFigureSize(width,height) {
