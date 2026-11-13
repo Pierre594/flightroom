@@ -27,26 +27,6 @@ export function parseDataCsv(text, name='Data.csv') {
   return {name,times,columns:names.map((column,i)=>({name:column,values:columns[i]}))};
 }
 
-// Replace one imported source across all subplots. Match duplicate column
-// names in order, so each existing curve keeps its own settings and subplot.
-export function replaceDataSource(series,sourceId,parsed,createSeries) {
-  const old=series.filter(item=>item.sourceId===sourceId);
-  if(!old.length)throw new Error('The CSV source is no longer present.');
-  const byName=new Map();for(const item of old){if(!byName.has(item.name))byName.set(item.name,[]);byName.get(item.name).push(item);}
-  let matched=0;const matchedSeries=new Map(),addedSeries=[];
-  parsed.columns.forEach((column,index)=>{
-    const existing=byName.get(column.name)?.shift();
-    const replacement={...(existing ?? createSeries(column,index)),sourceId,source:parsed.name,name:column.name,times:parsed.times,values:column.values};
-    if(existing){matched++;matchedSeries.set(existing,replacement);}else addedSeries.push(replacement);
-  });
-  const last=old.at(-1),updated=[];
-  for(const item of series){
-    if(item.sourceId!==sourceId)updated.push(item);else if(matchedSeries.has(item))updated.push(matchedSeries.get(item));
-    if(item===last)updated.push(...addedSeries);
-  }
-  return {series:updated,matched,added:addedSeries.length,removed:old.length-matched};
-}
-
 export function dataWindow(start, current, span, threshold, end=Infinity) {
   const hasEnd=Number.isFinite(end) && end>start;
   const width=hasEnd?Math.min(span,end-start):span;

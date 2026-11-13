@@ -33,6 +33,8 @@ test('named projects save atomically, overwrite, list and reopen',async()=>{
     assert.deepEqual(await readdir(join(root,'projects')),['Flight one.json']);
     response=await request(middleware,'GET','/__flightroom_projects/list');assert.deepEqual(JSON.parse(response.body).projects,[{name:'Flight one',type:'flightroom-data'}]);
     response=await request(middleware,'GET','/__flightroom_projects/open?name=Flight%20one');assert.equal(JSON.parse(response.body).content,'second');
+    response=await request(middleware,'POST',url,JSON.stringify({type:'flightroom-data',version:2,content:'shared library'}));assert.equal(response.status,200);
+    response=await request(middleware,'POST',url,JSON.stringify({type:'flightroom-3d',version:2}));assert.equal(response.status,400);
     response=await request(middleware,'POST','/__flightroom_projects/save?name=..%2Fescape',JSON.stringify({type:'flightroom-3d',version:1}));assert.equal(response.status,400);
     response=await request(middleware,'GET','/__flightroom_projects/list','',{'sec-fetch-site':'cross-site'});assert.equal(response.status,403);
   }finally{await rm(root,{recursive:true,force:true});}

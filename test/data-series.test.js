@@ -54,15 +54,3 @@ test('automatic limits follow drawn data, interpolate window edges, and stay wit
   assert.deepEqual(visibleSubplotRange(multiple,plot,{left:0,right:5},2,full),{min:-2,max:22});
 });
 
-test('replacing a CSV preserves matching series across subplots and reconciles changed columns',async()=>{
-  const {replaceDataSource}=await import('../src/data-series.js');
-  const base={sourceId:'source',source:'old.csv',times:[0,1],values:[0,1],style:'solid',width:2,visible:true};
-  const old=[{...base,id:'a1',name:'A',label:'Custom label',plotId:'first',color:'#112233',style:'dashed',visible:false},{...base,id:'other',sourceId:'other',name:'Z',plotId:'first'},{...base,id:'b',name:'B',label:'B',plotId:'second',color:'#223344'},{...base,id:'a2',name:'A',label:'Second A',plotId:'second',color:'#334455'}];
-  const parsed=parseDataCsv('time,A,C,A\n0,3,4,5\n2,6,7,8\n','new.csv');
-  const result=replaceDataSource(old,'source',parsed,(column,index)=>({id:`new-${index}`,plotId:'first',label:column.name,color:'#abcdef',style:'solid',width:2.5,visible:true}));
-  assert.deepEqual([result.matched,result.added,result.removed],[2,1,1]);
-  assert.deepEqual(result.series.map(item=>item.id),['a1','other','a2','new-1']);
-  assert.deepEqual(result.series[0],{...old[0],source:'new.csv',times:[0,2],values:[3,6]});
-  assert.equal(result.series[2].plotId,'second');assert.equal(result.series[2].label,'Second A');assert.equal(result.series[3].plotId,'first');assert.equal(result.series[1],old[1]);
-  assert.equal(old[0].source,'old.csv');assert.throws(()=>replaceDataSource(old,'missing',parsed,()=>({})),/no longer present/);
-});

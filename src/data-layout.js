@@ -117,9 +117,9 @@ export function movePlotWithinGroup(plots,id,delta) {
   return reordered;
 }
 
-// Insert alongside the selected plot, or in a new row/column immediately after it.
+// Insert beside the selected plot or in an adjacent row/column.
 export function insertPlotRelative(plots,layout,id,direction,newPlot) {
-  if(!plots.some(plot=>plot.id===id)||!['beside','below'].includes(direction))return {plots,layout};
+  if(!plots.some(plot=>plot.id===id)||!['beside','below','left','above'].includes(direction))return {plots,layout};
   let result=plots.map(plot=>({...plot}));
   if(layout==='vertical'||layout==='horizontal'){
     layout=layout==='vertical'?'rows':'columns';
@@ -129,12 +129,13 @@ export function insertPlotRelative(plots,layout,id,direction,newPlot) {
     result.forEach(plot=>{plot.group=groups.indexOf(plot.group)+1;});
   }
   const index=result.findIndex(plot=>plot.id===id),group=result[index].group;
-  const sameGroup=(layout==='rows'&&direction==='beside')||(layout==='columns'&&direction==='below');
-  if(sameGroup)result.splice(index+1,0,{...newPlot,group});
+  const before=direction==='left'||direction==='above',horizontal=direction==='beside'||direction==='left';
+  const sameGroup=(layout==='rows'&&horizontal)||(layout==='columns'&&!horizontal);
+  if(sameGroup)result.splice(index+(before?0:1),0,{...newPlot,group});
   else{
-    result.forEach(plot=>{if(plot.group>group)plot.group++;});
-    const insertAt=result.reduce((last,plot,i)=>plot.group===group?i+1:last,0);
-    result.splice(insertAt,0,{...newPlot,group:group+1});
+    const insertAt=before?result.findIndex(plot=>plot.group===group):result.reduce((last,plot,i)=>plot.group===group?i+1:last,0);
+    result.forEach(plot=>{if(plot.group>group||(before&&plot.group===group))plot.group++;});
+    result.splice(insertAt,0,{...newPlot,group:before?group:group+1});
   }
   return {plots:result,layout};
 }

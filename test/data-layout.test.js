@@ -140,3 +140,15 @@ test('CSV timestamp annotations detach and reattach from their actual timestamp 
   assert.equal(position(23,16),null);
   assert.equal(position(12,5),.5);
 });
+
+test('plots can be inserted above or left of a selected subplot',()=>{
+  const plot=id=>({id,width:100,height:100,group:1});
+  let result=insertPlotRelative([plot('base')],'vertical','base','above',plot('above'));
+  assert.deepEqual(result.plots.map(p=>p.id),['above','base']);assert.deepEqual(result.plots.map(p=>p.group),[1,2]);
+  result=insertPlotRelative(result.plots,result.layout,'base','left',plot('left'));
+  assert.deepEqual(result.plots.map(p=>p.id),['above','left','base']);assert.deepEqual(result.plots.map(p=>p.group),[1,2,2]);
+  result=insertPlotRelative([plot('base')],'horizontal','base','left',plot('left'));
+  assert.deepEqual(result.plots.map(p=>p.id),['left','base']);assert.deepEqual(result.plots.map(p=>p.group),[1,2]);
+  result=insertPlotRelative(result.plots,result.layout,'base','above',plot('top'));
+  assert.deepEqual(result.plots.map(p=>p.id),['left','top','base']);assert.deepEqual(result.plots.map(p=>p.group),[1,2,2]);
+});

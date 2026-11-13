@@ -138,3 +138,9 @@ test('time axis uses two decimal places without changing vertical data formattin
   labels.length=0;state.start=-.004;state.end=5.996;state.windowSeconds=6;drawDataChart(canvas,state,state.start);
   assert.equal(labels.find(label=>label.y===area.bottom+15).text,'00.00');
 });
+
+test('annotations can use a loaded CSV even when none of its fields are plotted',()=>{
+  const labels=[],context=new Proxy({measureText:text=>({width:text.length*8}),fillText:text=>labels.push(text)},{get:(target,key)=>target[key]??(()=>{})});
+  const state={plots:[{id:'a',width:100,height:100,legend:{visible:false}}],layout:'vertical',sources:[{sourceId:'unplotted'}],series:[{sourceId:'plotted',plotId:'a',label:'Data',times:[0,10],values:[0,1],visible:true,color:'#eeeeee',style:'solid',width:2}],start:0,end:10,windowSeconds:10,threshold:.7,figureWidth:1280,backgroundColor:'#ffffff',backgroundOpacity:1,texts:[{type:'text',text:'Unplotted source',plotId:'a',x:10,anchor:{sourceId:'unplotted',time:5,offset:0},start:null,end:null,y:20,size:20,color:'#123456'}]};
+  drawDataChart({width:1280,height:720,getContext:()=>context},state,5);assert.ok(labels.includes('Unplotted source'));
+});

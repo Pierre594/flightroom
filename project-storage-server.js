@@ -28,7 +28,7 @@ export function createProjectMiddleware(root) {
       let name;try{name=normalizeProjectName(url.searchParams.get('name'));}catch(error){return reply(res,400,{error:error.message});}const path=join(directory,`${name}.json`);
       if(url.pathname.endsWith('/save')&&req.method==='POST'){
         const bytes=await readBody(req);let project;try{project=JSON.parse(bytes.toString('utf8'));}catch{return reply(res,400,{error:'Project must contain valid JSON.'});}
-        if(!project||!['flightroom-3d','flightroom-data'].includes(project.type)||project.version!==1)return reply(res,400,{error:'Invalid project type.'});
+        if(!project||!['flightroom-3d','flightroom-data'].includes(project.type)||(project.version!==1&&!(project.type==='flightroom-data'&&project.version===2)))return reply(res,400,{error:'Invalid project type.'});
         const temp=join(directory,`.flightroom-${randomUUID()}.tmp`);try{await writeFile(temp,bytes,{flag:'wx'});await rename(temp,path);}finally{await rm(temp,{force:true});}
         return reply(res,200,{name,filename:`${name}.json`});
       }

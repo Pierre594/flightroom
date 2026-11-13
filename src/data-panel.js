@@ -1,4 +1,5 @@
-import {parseDataCsv,replaceDataSource,dataRange,dataWindow} from './data-series.js';
+import {parseDataCsv,dataRange,dataWindow} from './data-series.js';
+import {createDataSource,replaceLibrarySource,migrateLegacySeries,restoreLibrarySeries} from './data-library.js';
 import {buildScaleProfile,quantizedSubplotRange,quantizeRange} from './data-scaling.js';
 import {drawDataChart} from './data-chart.js';
 import {videoFrameCount,videoFrameTiming} from './export-video.js';
@@ -16,8 +17,8 @@ const defaultLegend=(size=10)=>({visible:true,position:'top-right',point:null,si
 const newPlot=(labelSize=10)=>({id:makeId(),title:'',titleSize:14,xLabel:'Time (s)',yLabel:'Value',width:100,height:100,group:1,yRangeMode:'auto',yMargin:10,yStep:1,yMin:null,yMax:null,backgroundColor:null,legend:defaultLegend(labelSize)});
 
 export function initDataPanel(onExportState=()=>{}) {
-  const state={series:[],plots:[{...newPlot(),id:'plot-1'}],layout:'vertical',texts:[],figureWidth:1920,figureHeight:1080,start:0,end:0,current:0,windowSeconds:10,threshold:.7,title:'Data over time',titleAlign:'left',titleSize:18,labelSize:10,legendPosition:'top-right',legendPoint:null,legendSize:10,showLegend:true,showMarkers:true,backgroundColor:'#ffffff',backgroundOpacity:1,plotRanges:{},fullRanges:{},scaleProfiles:{},playing:false,exporting:false,cancelled:false};
-  const canvas=$('data-chart'),plotLists=new Map(),sourceLists=new Map(),plotStatuses=new Map(),seriesToggles=new Map(),legendPositions=new Map(),legendSizes=new Map(),rangeControls=new Map(),collapsedSeries=new Set(),importMessages=new Map();let legendBoxes=[],lastTick=null,animation=0,downloadUrl=null,drag=null,editingText=null,pendingImports=0,loadingProject=false,savingProject=false,dataProjectLibrary=null;
+  const state={sources:[],series:[],plots:[{...newPlot(),id:'plot-1'}],layout:'vertical',texts:[],figureWidth:1920,figureHeight:1080,start:0,end:0,current:0,windowSeconds:10,threshold:.7,title:'Data over time',titleAlign:'left',titleSize:18,labelSize:10,legendPosition:'top-right',legendPoint:null,legendSize:10,showLegend:true,showMarkers:true,backgroundColor:'#ffffff',backgroundOpacity:1,plotRanges:{},fullRanges:{},scaleProfiles:{},playing:false,exporting:false,cancelled:false};
+  const canvas=$('data-chart'),plotLists=new Map(),seriesToggles=new Map(),legendPositions=new Map(),legendSizes=new Map(),rangeControls=new Map(),collapsedSeries=new Set(),expandedSources=new Set();let legendBoxes=[],lastTick=null,animation=0,downloadUrl=null,drag=null,editingText=null,pendingImports=0,loadingProject=false,savingProject=false,dataProjectLibrary=null;
   function updateProjectControls(){const disabled=state.exporting||loadingProject||savingProject;for(const id of ['data-project-name','data-project-input','data-save-project','data-export'])$(id).disabled=disabled;dataProjectLibrary?.setLocked(disabled);}
   function feedback(message,error=false){const node=$('data-feedback');node.hidden=false;node.textContent=message;node.classList.toggle('error',error);}
   function redraw(){refreshVisibleRanges();legendBoxes=drawDataChart(canvas,state,state.current,{ranges:state.plotRanges});$('data-empty').hidden=state.series.length>0;$('data-current').textContent=`${state.current.toFixed(2)} s`;$('data-end').textContent=`${state.end.toFixed(2)} s`;$('data-timeline').value=state.current;}
@@ -48,14 +49,6 @@ export function initDataPanel(onExportState=()=>{}) {
       list.replaceChildren();list.hidden=count>0&&collapsed;toggle.hidden=count===0;
       toggle.textContent=collapsed?`▸ Show ${count} data series`:'▾ Collapse data series';toggle.setAttribute('aria-expanded',String(!collapsed));
       if(!count)list.append(element('div',{className:'cable-empty',textContent:'No data series in this subplot yet.'}));
-      const sourceList=sourceLists.get(id),sources=[...new Map(state.series.filter(s=>s.plotId===id).map(s=>[s.sourceId,s])).values()];sourceList.replaceChildren();sourceList.hidden=!sources.length;
-      const totals=new Map(),seen=new Map();for(const source of sources)totals.set(source.source,(totals.get(source.source)??0)+1);
-      for(const source of sources){
-        const number=(seen.get(source.source)??0)+1;seen.set(source.source,number);const name=source.source+(totals.get(source.source)>1?` · import ${number}`:'');
-        const row=element('div',{className:'data-source-row'}),nameLabel=element('span',{textContent:name,title:name}),upload=element('label',{className:'data-source-replace',textContent:'Replace CSV'}),input=element('input',{type:'file',accept:'.csv,text/csv',hidden:true});
-        const plotIndex=state.plots.findIndex(plot=>plot.id===id);input.setAttribute('aria-label',`Replace CSV ${name} in subplot ${plotIndex+1}`);input.addEventListener('change',event=>replaceSource(event,id,source.sourceId));upload.append(input);row.append(nameLabel,upload);sourceList.append(row);
-      }
-      if(sources.some(source=>state.series.some(item=>item.sourceId===source.sourceId&&item.plotId!==id)))sourceList.append(element('p',{className:'hint data-source-shared',textContent:'Replacing a shared CSV updates every subplot that uses it.'}));
     }
     for(const series of state.series){
       const list=plotLists.get(series.plotId);if(!list)continue;
@@ -77,20 +70,21 @@ export function initDataPanel(onExportState=()=>{}) {
     const select=$('data-text-plot'),previous=select.value;select.replaceChildren();
     state.plots.forEach((plot,i)=>select.add(new Option(plotName(plot,i),plot.id)));
     if(state.plots.some(plot=>plot.id===previous))select.value=previous;
+    refreshLibraryTarget();
   }
   function renderLayoutMap(){
     const map=$('data-layout-map'),height=1280*state.figureHeight/state.figureWidth;map.replaceChildren();map.style.aspectRatio=`${state.figureWidth} / ${state.figureHeight}`;
     for(const [index,layout] of figureLayout(1280,height,state.plots,state.layout,{labelSize:state.labelSize}).entries()){
       const plot=state.plots[index],cell=layout.cell,button=element('button',{type:'button',className:'data-layout-cell',textContent:plotName(plot,index),title:`Edit ${plotName(plot,index)}`});
       Object.assign(button.style,{left:`${cell.x/1280*100}%`,top:`${cell.y/height*100}%`,width:`${cell.width/1280*100}%`,height:`${cell.height/height*100}%`});
-      button.addEventListener('click',()=>{const card=document.getElementById(`data-plot-${plot.id}`);card?.scrollIntoView({block:'nearest',behavior:'smooth'});card?.querySelector('input[type=text]')?.focus({preventScroll:true});});map.append(button);
+      enableFieldDrop(button,plot.id);button.addEventListener('click',()=>{const card=document.getElementById(`data-plot-${plot.id}`);card?.scrollIntoView({block:'nearest',behavior:'smooth'});card?.querySelector('input[type=text]')?.focus({preventScroll:true});});map.append(button);
     }
   }
   function renderPlots(){
-    const list=$('data-plot-list');list.replaceChildren();plotLists.clear();sourceLists.clear();plotStatuses.clear();seriesToggles.clear();legendPositions.clear();legendSizes.clear();rangeControls.clear();
+    const list=$('data-plot-list');list.replaceChildren();plotLists.clear();seriesToggles.clear();legendPositions.clear();legendSizes.clear();rangeControls.clear();
     state.plots.forEach((plot,index)=>{
       const card=element('div',{className:'data-plot-card',id:`data-plot-${plot.id}`}),head=element('div',{className:'data-plot-heading'}),actions=element('div');
-      head.append(element('strong',{textContent:`Subplot ${index+1}`}));
+      enableFieldDrop(card,plot.id);head.append(element('strong',{textContent:`Subplot ${index+1}`}));
       const grouped=state.layout==='rows'||state.layout==='columns',rows=state.layout==='rows',horizontal=state.layout==='horizontal';
       const groups=[...new Set(state.plots.map(p=>p.group))].sort((a,b)=>a-b),groupIndex=groups.indexOf(plot.group),members=state.plots.filter(p=>p.group===plot.group),memberIndex=members.indexOf(plot);
       const refresh=()=>{renderPlots();renderSeries();refreshTextPlots();renderTexts();redraw();};
@@ -105,7 +99,7 @@ export function initDataPanel(onExportState=()=>{}) {
         const direction=rows?(delta<0?'left':'right'):(delta<0?'up':'down'),symbol={up:'↑',down:'↓',left:'←',right:'→'}[direction];
         addMove(symbol,`Move subplot ${direction} within ${rows?'row':'column'}`,memberIndex+delta<0||memberIndex+delta>=members.length,()=>{state.plots=movePlotWithinGroup(state.plots,plot.id,delta);});
       }
-      const remove=element('button',{type:'button',textContent:'×',title:'Remove subplot'});remove.disabled=state.plots.length===1;remove.addEventListener('click',()=>{state.plots.splice(index,1);importMessages.delete(plot.id);collapsedSeries.delete(plot.id);const fallback=state.plots[0].id;for(const s of state.series)if(s.plotId===plot.id)s.plotId=fallback;for(const text of state.texts)if(text.plotId===plot.id)text.plotId=fallback;updateRanges();refresh();});actions.append(remove);head.append(actions);
+      const remove=element('button',{type:'button',textContent:'×',title:'Remove subplot'});remove.disabled=state.plots.length===1;remove.addEventListener('click',()=>{state.plots.splice(index,1);collapsedSeries.delete(plot.id);const fallback=state.plots[0].id;for(const s of state.series)if(s.plotId===plot.id)s.plotId=fallback;for(const text of state.texts)if(text.plotId===plot.id)text.plotId=fallback;updateRanges();refresh();});actions.append(remove);head.append(actions);
       const form=element('div',{className:'data-form'});
       for(const [key,name,placeholder] of [['title','Subplot title','Optional title'],['xLabel','Horizontal axis','Time (s)'],['yLabel','Vertical axis','Value']]){
         const input=element('input',{type:'text',value:plot[key],placeholder,maxLength:80});input.setAttribute('aria-label',`${name} for subplot ${index+1}`);input.addEventListener('input',()=>{plot[key]=input.value;if(key==='title'){renderSeries();refreshTextPlots();renderTexts();renderLayoutMap();}redraw();});form.append(labelFor(name,input));
@@ -136,26 +130,22 @@ export function initDataPanel(onExportState=()=>{}) {
       backgroundMode.addEventListener('change',()=>{plot.backgroundColor=backgroundMode.value==='custom'?backgroundColor.value:null;colorLabel.hidden=backgroundMode.value!=='custom';redraw();});
       backgroundColor.addEventListener('input',()=>{plot.backgroundColor=backgroundColor.value;redraw();});form.append(labelFor('Plot background',backgroundMode),colorLabel);
       const placement=element('div',{className:'data-placement-actions'});
-      for(const [direction,label] of [['beside','＋ Plot beside'],['below','＋ Plot below']]){const button=element('button',{type:'button',textContent:label});button.setAttribute('aria-label',`${label} subplot ${index+1}`);button.addEventListener('click',()=>{const result=insertPlotRelative(state.plots,state.layout,plot.id,direction,newPlot(state.labelSize));state.plots=result.plots;state.layout=result.layout;$('data-layout').value=state.layout;updateRanges();refresh();});placement.append(button);}
+      for(const [direction,label] of [['above','＋ Plot above'],['below','＋ Plot below'],['left','＋ Plot left'],['beside','＋ Plot right']]){const button=element('button',{type:'button',textContent:label});button.setAttribute('aria-label',`${label} subplot ${index+1}`);button.addEventListener('click',()=>{const result=insertPlotRelative(state.plots,state.layout,plot.id,direction,newPlot(state.labelSize));state.plots=result.plots;state.layout=result.layout;$('data-layout').value=state.layout;updateRanges();refresh();});placement.append(button);}
       const legend=plot.legend ??=defaultLegend(state.labelSize),legendSettings=element('details',{className:'data-legend-settings'}),legendTitle=element('summary',{textContent:'Legend'}),legendForm=element('div',{className:'data-form'});
       const show=element('input',{type:'checkbox',checked:legend.visible});show.setAttribute('aria-label',`Show legend for subplot ${index+1}`);show.addEventListener('change',()=>{legend.visible=show.checked;renderLayoutMap();redraw();});
       const showLabel=element('label',{className:'data-legend-show'});showLabel.append(show,document.createTextNode(' Show legend'));
       const position=element('select');position.setAttribute('aria-label',`Legend position for subplot ${index+1}`);for(const [value,label] of [['top-right','Top right'],['top-left','Top left'],['bottom-right','Bottom right'],['bottom-left','Bottom left'],['outside-top','Above plot · horizontal'],['custom','Custom · dragged']])position.add(new Option(label,value));position.value=legend.position;legendPositions.set(plot.id,position);position.addEventListener('change',()=>{legend.position=position.value;if(legend.position==='custom'&&!legend.point)legend.point={x:.5,y:.1};renderLayoutMap();redraw();});
       const legendSize=element('input',{type:'number',min:'10',max:'36',step:'1',value:legend.size});legendSize.setAttribute('aria-label',`Legend text size for subplot ${index+1}`);legendSizes.set(plot.id,legendSize);legendSize.addEventListener('change',()=>{const value=Number(legendSize.value);if(!Number.isFinite(value)||value<10||value>36){legendSize.value=legend.size;return feedback('Legend size must be between 10 and 36.',true);}legend.size=value;renderLayoutMap();redraw();});
       legendForm.append(showLabel,labelFor('Position',position),labelFor('Text size',legendSize));legendSettings.append(legendTitle,legendForm);
-      const upload=element('label',{className:'add-button data-import data-plot-import'});upload.append(element('span',{textContent:'＋'}),document.createTextNode(' Add CSV files'));
-      const fileInput=element('input',{type:'file',multiple:true,hidden:true});fileInput.setAttribute('aria-label',`Add CSV files to subplot ${index+1}`);fileInput.addEventListener('change',event=>importData(event,plot.id));upload.append(fileInput);
-      const status=element('p',{className:'data-import-feedback',hidden:true});status.setAttribute('role','status');plotStatuses.set(plot.id,status);
-      const saved=importMessages.get(plot.id);if(saved){status.hidden=false;status.textContent=saved.text;status.classList.toggle('error',saved.error);}
+      const drop=element('div',{className:'data-field-drop',textContent:'Drop data fields here'});drop.setAttribute('aria-label',`Drop data fields in subplot ${index+1}`);enableFieldDrop(drop,plot.id);
       const toggle=element('button',{type:'button',className:'data-series-toggle',hidden:true});toggle.setAttribute('aria-controls',`data-series-${plot.id}`);toggle.addEventListener('click',()=>{if(collapsedSeries.has(plot.id))collapsedSeries.delete(plot.id);else collapsedSeries.add(plot.id);renderSeries();});seriesToggles.set(plot.id,toggle);
-      const sourceList=element('div',{className:'data-source-list',hidden:true});sourceList.setAttribute('aria-label',`CSV files in subplot ${index+1}`);sourceLists.set(plot.id,sourceList);
       const seriesList=element('div',{className:'data-series-list data-plot-series',id:`data-series-${plot.id}`});plotLists.set(plot.id,seriesList);
-      card.append(head,form,placement,legendSettings,upload,status,sourceList,toggle,seriesList);list.append(card);
+      card.append(head,drop,form,placement,legendSettings,toggle,seriesList);list.append(card);
     });
     updateRangeControls(true);
     renderLayoutMap();
   }
-  function dataSources(){return [...new Map(state.series.map(s=>[s.sourceId,s])).values()];}
+  function dataSources(){return state.sources;}
   function refreshAnnotationSources(){
     const select=$('data-anchor-source'),previous=select.value,editing=state.texts.find(item=>item.id===editingText),sources=dataSources();select.replaceChildren();
     const totals=new Map(),counts=new Map();for(const source of sources)totals.set(source.source,(totals.get(source.source)??0)+1);
@@ -210,42 +200,85 @@ export function initDataPanel(onExportState=()=>{}) {
     $('data-title-size-value').textContent=state.titleSize;$('data-label-size-value').textContent=state.labelSize;
     $('data-threshold-value').textContent=`${Math.round(state.threshold*100)}%`;$('data-background-opacity-value').textContent=`${Math.round(state.backgroundOpacity*100)}%`;$('data-show-markers').checked=state.showMarkers;
   }
-  async function replaceSource(event,plotId,sourceId){
+  const fieldMime='application/x-flightroom-data-field';
+  function refreshLibraryTarget(){
+    const select=$('data-library-target'),previous=select.value;select.replaceChildren();
+    state.plots.forEach((plot,index)=>select.add(new Option(plotName(plot,index),plot.id)));
+    if(state.plots.some(plot=>plot.id===previous))select.value=previous;
+  }
+  function libraryFeedback(message,error=false){const node=$('data-library-feedback');node.hidden=false;node.textContent=message;node.classList.toggle('error',error);feedback(message,error);}
+  function addField(sourceId,columnId,plotId){
+    if(state.exporting||loadingProject||savingProject||pendingImports)return libraryFeedback('Wait for the current data operation to finish.',true);
+    const source=state.sources.find(item=>item.sourceId===sourceId),column=source?.columns.find(item=>item.id===columnId);
+    if(!source||!column||!state.plots.some(plot=>plot.id===plotId))return libraryFeedback('The field or subplot is no longer available.',true);
+    const reset=state.series.length===0;
+    state.series.push({id:makeId(),sourceId,columnId,plotId,source:source.source,name:column.name,label:column.name,times:source.times,values:column.values,color:palette[state.series.length%palette.length],style:'solid',width:2.5,visible:true});
+    collapsedSeries.delete(plotId);pause();bounds(reset);renderSeries();libraryFeedback(`Added ${column.name} to ${plotName(state.plots.find(plot=>plot.id===plotId),state.plots.findIndex(plot=>plot.id===plotId))}.`);
+  }
+  function enableFieldDrop(target,plotId){
+    const accepts=event=>Array.from(event.dataTransfer?.types??[]).includes(fieldMime);
+    target.addEventListener('dragover',event=>{if(!accepts(event))return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect='copy';target.classList.add('data-drop-active');});
+    target.addEventListener('dragleave',event=>{if(!target.contains(event.relatedTarget))target.classList.remove('data-drop-active');});
+    target.addEventListener('drop',event=>{if(!accepts(event))return;event.preventDefault();event.stopPropagation();target.classList.remove('data-drop-active');try{const data=JSON.parse(event.dataTransfer.getData(fieldMime));addField(data.sourceId,data.columnId,plotId);}catch{libraryFeedback('Could not read the dragged data field.',true);}});
+  }
+  function enableChartDrop(){
+    const overlay=element('div',{className:'data-chart-drop-target',hidden:true});overlay.setAttribute('aria-hidden','true');canvas.parentElement.append(overlay);
+    const field=event=>Array.from(event.dataTransfer?.types??[]).includes(fieldMime);
+    function hit(event){
+      const rect=canvas.getBoundingClientRect(),height=1280*canvas.height/canvas.width,x=(event.clientX-rect.left)/rect.width*1280,y=(event.clientY-rect.top)/rect.height*height;
+      const layouts=figureLayout(1280,height,state.plots,state.layout,{labelSize:state.labelSize});
+      const index=layouts.findIndex(({cell})=>x>=cell.x&&x<=cell.x+cell.width&&y>=cell.y&&y<=cell.y+cell.height);
+      if(index<0)return null;return {index,cell:layouts[index].cell,height};
+    }
+    canvas.addEventListener('dragover',event=>{
+      if(!field(event)||state.exporting)return;const target=hit(event);if(!target){overlay.hidden=true;return;}
+      event.preventDefault();event.dataTransfer.dropEffect='copy';const {cell,height,index}=target;
+      Object.assign(overlay.style,{left:`${cell.x/1280*100}%`,top:`${cell.y/height*100}%`,width:`${cell.width/1280*100}%`,height:`${cell.height/height*100}%`});overlay.textContent=`Drop into ${plotName(state.plots[index],index)}`;overlay.hidden=false;
+    });
+    canvas.addEventListener('dragleave',()=>{overlay.hidden=true;});
+    canvas.addEventListener('drop',event=>{overlay.hidden=true;if(!field(event)||state.exporting)return;const target=hit(event);if(!target)return;event.preventDefault();try{const data=JSON.parse(event.dataTransfer.getData(fieldMime));addField(data.sourceId,data.columnId,state.plots[target.index].id);}catch{libraryFeedback('Could not read the dragged data field.',true);}});
+  }
+  function renderLibrary(){
+    const list=$('data-library-list');list.replaceChildren();$('data-library-count').textContent=String(state.sources.length).padStart(2,'0');
+    if(!state.sources.length)list.append(element('div',{className:'cable-empty',textContent:'No CSV files loaded yet.'}));
+    const totals=new Map(),seen=new Map();for(const source of state.sources)totals.set(source.source,(totals.get(source.source)??0)+1);
+    for(const source of state.sources){
+      const number=(seen.get(source.source)??0)+1;seen.set(source.source,number);const name=source.source+(totals.get(source.source)>1?` · import ${number}`:'');
+      const group=element('details',{className:'data-library-source',open:expandedSources.has(source.sourceId)}),summary=element('summary'),title=element('span',{textContent:name,title:name});summary.append(title,element('span',{className:'data-library-field-count',textContent:`${source.columns.length} fields`}));group.append(summary);group.addEventListener('toggle',()=>{if(group.open)expandedSources.add(source.sourceId);else expandedSources.delete(source.sourceId);});
+      const actions=element('div',{className:'data-library-actions'}),replace=element('label',{className:'data-source-replace',textContent:'Replace CSV'}),input=element('input',{type:'file',accept:'.csv,text/csv',hidden:true});input.setAttribute('aria-label',`Replace CSV ${name}`);input.addEventListener('change',event=>replaceSource(event,source.sourceId));replace.append(input);
+      const remove=element('button',{type:'button',textContent:'Remove CSV',title:'Remove this CSV and all its plotted curves'});remove.setAttribute('aria-label',`Remove CSV ${name} and its plotted curves`);remove.addEventListener('click',()=>{state.sources=state.sources.filter(item=>item.sourceId!==source.sourceId);state.series=state.series.filter(item=>item.sourceId!==source.sourceId);expandedSources.delete(source.sourceId);pause();bounds();renderLibrary();renderSeries();renderTexts();libraryFeedback(`Removed ${name} and its plotted curves. Linked annotations remain in the project.`);});actions.append(replace,remove);group.append(actions);
+      const fields=element('div',{className:'data-library-fields'}),counts=new Map(),seenFields=new Map();for(const col of source.columns)counts.set(col.name,(counts.get(col.name)??0)+1);
+      for(const column of source.columns){
+        const n=(seenFields.get(column.name)??0)+1;seenFields.set(column.name,n);const fieldName=column.name+(counts.get(column.name)>1?` · ${n}`:'');
+        const row=element('div',{className:'data-library-field'}),field=element('button',{type:'button',className:'data-field-button',textContent:fieldName,title:`Drag to a subplot, or click to add to the selected subplot`,draggable:true});field.setAttribute('aria-label',`Add ${fieldName} from ${name} to selected subplot`);field.addEventListener('click',()=>addField(source.sourceId,column.id,$('data-library-target').value));field.addEventListener('dragstart',event=>{event.dataTransfer.setData(fieldMime,JSON.stringify({sourceId:source.sourceId,columnId:column.id}));event.dataTransfer.effectAllowed='copy';});row.append(field,element('span',{textContent:'↗',className:'data-field-handle'}));fields.append(row);
+      }
+      group.append(fields);list.append(group);
+    }
+    refreshAnnotationSources();
+  }
+  async function replaceSource(event,sourceId){
     const file=event.target.files[0];if(!file)return;
-    if(pendingImports||loadingProject||savingProject||state.exporting){event.target.value='';return feedback('Wait for the current data operation to finish.',true);}
+    if(pendingImports||loadingProject||savingProject||state.exporting){event.target.value='';return libraryFeedback('Wait for the current data operation to finish.',true);}
     pendingImports++;
     try{
-      const parsed=parseDataCsv(await file.text(),file.name);
-      if(!state.plots.some(plot=>plot.id===plotId))throw new Error('The subplot was removed before the CSV finished loading.');
-      const updated=replaceDataSource(state.series,sourceId,parsed,(column,index)=>({id:makeId(),plotId,label:column.name,color:palette[(state.series.length+index)%palette.length],style:'solid',width:2.5,visible:true}));
-      state.series=updated.series;
+      const parsed=parseDataCsv(await file.text(),file.name),source=state.sources.find(item=>item.sourceId===sourceId);if(!source)throw new Error('The CSV source is no longer present.');
+      const updated=replaceLibrarySource(source,parsed,state.series,makeId);state.sources=state.sources.map(item=>item.sourceId===sourceId?updated.source:item);state.series=updated.series;
       for(const item of state.texts)if(item.anchor?.sourceId===sourceId)item.anchor.sourceName=parsed.name;
       const outside=state.texts.filter(item=>item.anchor?.sourceId===sourceId&&(item.anchor.time<parsed.times[0]||item.anchor.time>parsed.times.at(-1))).length;
-      pause();bounds();renderSeries();renderTexts();
-      const details=[`${updated.matched} matched`,`${updated.added} added`,`${updated.removed} removed`].join(', ');
-      const message=`Updated ${parsed.name} across its subplots: ${details}.${outside?` ${outside} annotation${outside===1?' has':'s have'} a timestamp outside the new CSV range; review the annotation settings.`:''}`;
-      importMessages.set(plotId,{text:message,error:false});const status=plotStatuses.get(plotId);if(status){status.hidden=false;status.textContent=message;status.classList.remove('error');}feedback(message);
-    }catch(error){
-      const message=`Could not replace CSV: ${error.message}`;if(state.plots.some(plot=>plot.id===plotId))importMessages.set(plotId,{text:message,error:true});const status=plotStatuses.get(plotId);if(status){status.hidden=false;status.textContent=message;status.classList.add('error');}feedback(message,true);
-    }finally{pendingImports--;event.target.value='';}
+      pause();bounds();renderLibrary();renderSeries();renderTexts();
+      libraryFeedback(`Updated ${parsed.name}: ${updated.matched} matching fields, ${updated.added} added, ${updated.removed} removed; ${updated.removedCurves} plotted curves removed.${outside?` ${outside} annotation${outside===1?' has':'s have'} a timestamp outside the new CSV range.`:''}`);
+    }catch(error){libraryFeedback(`Could not replace CSV: ${error.message}`,true);}finally{pendingImports--;event.target.value='';}
   }
-  async function importData(event,plotId){
-    const files=[...event.target.files],errors=[];let added=0,resetTime=false;
-    if(!files.length)return;if(loadingProject||savingProject){event.target.value='';return feedback('Wait for the graph project operation to finish.',true);}pendingImports++;
+  async function importData(event){
+    const files=[...event.target.files],errors=[];let added=0;
+    if(!files.length)return;if(pendingImports||loadingProject||savingProject||state.exporting){event.target.value='';return libraryFeedback('Wait for the current data operation to finish.',true);}pendingImports++;
     try{
-      for(const file of files)try{
-        const parsed=parseDataCsv(await file.text(),file.name);
-        if(!state.plots.some(plot=>plot.id===plotId)){errors.push(`${file.name}: the subplot was removed before import finished.`);continue;}
-        if(!state.series.length)resetTime=true;
-        const sourceId=makeId();for(const column of parsed.columns) {state.series.push({id:makeId(),sourceId,plotId,source:parsed.name,name:column.name,label:column.name,times:parsed.times,values:column.values,color:palette[state.series.length%palette.length],style:'solid',width:2.5,visible:true});added++;}
-      }catch(error){errors.push(error.message);}
-      if(added){pause();bounds(resetTime);renderSeries();}
-      const message=errors.length?errors.join(' '):`Added ${added} data series.`;
-      if(state.plots.some(plot=>plot.id===plotId))importMessages.set(plotId,{text:message,error:Boolean(errors.length)});
-      const status=plotStatuses.get(plotId);if(status){status.hidden=false;status.textContent=message;status.classList.toggle('error',Boolean(errors.length));}
-      feedback(message,Boolean(errors.length));
+      for(const file of files)try{const parsed=parseDataCsv(await file.text(),file.name),source=createDataSource(parsed,makeId);state.sources.push(source);expandedSources.add(source.sourceId);added++;}catch(error){errors.push(error.message);}
+      renderLibrary();renderTexts();libraryFeedback(errors.length?`${added} CSV files loaded. ${errors.join(' ')}`:`Loaded ${added} CSV ${added===1?'file':'files'}. Drag or add fields to a subplot.`,Boolean(errors.length));
     }finally{pendingImports--;event.target.value='';}
   }
+  $('data-library-input').addEventListener('change',importData);
+  enableChartDrop();
   $('data-window').addEventListener('change',event=>{const n=Number(event.target.value);if(!Number.isFinite(n)||n<.01){event.target.value=state.windowSeconds;return feedback('Window duration must be at least 0.01 seconds.',true);}state.windowSeconds=n;updateRanges();redraw();});
   $('data-threshold').addEventListener('input',event=>{state.threshold=Number(event.target.value)/100;$('data-threshold-value').textContent=`${event.target.value}%`;updateRanges();redraw();});
   $('data-title').addEventListener('input',event=>{state.title=event.target.value;redraw();});
@@ -315,14 +348,14 @@ export function initDataPanel(onExportState=()=>{}) {
   $('data-save-project').addEventListener('click',async()=>{
     if(state.exporting||savingProject)return;if(pendingImports||loadingProject)return feedback('Wait for data loading to finish before saving.',true);
     try{const name=normalizeProjectName($('data-project-name').value);savingProject=true;updateProjectControls();feedback('Saving graph project…');
-    const project={type:'flightroom-data',version:1,series:state.series,plots:state.plots,layout:state.layout,texts:state.texts,figureWidth:state.figureWidth,figureHeight:state.figureHeight,current:state.current,windowSeconds:state.windowSeconds,threshold:state.threshold,title:state.title,titleAlign:state.titleAlign,titleSize:state.titleSize,labelSize:state.labelSize,xLabel:state.plots[0].xLabel,yLabel:state.plots[0].yLabel,legendPosition:state.legendPosition,legendPoint:state.legendPoint,legendSize:state.legendSize,showLegend:state.showLegend,showMarkers:state.showMarkers,backgroundColor:state.backgroundColor,backgroundOpacity:state.backgroundOpacity,frameFormat:$('data-frame-format').value,exportFormat:$('data-export-format').value,exportResolution:state.figureHeight,exportFps:Number($('data-export-fps').value)};
+    const project={type:'flightroom-data',version:2,sources:state.sources,series:state.series.map(({times,values,...item})=>item),plots:state.plots,layout:state.layout,texts:state.texts,figureWidth:state.figureWidth,figureHeight:state.figureHeight,current:state.current,windowSeconds:state.windowSeconds,threshold:state.threshold,title:state.title,titleAlign:state.titleAlign,titleSize:state.titleSize,labelSize:state.labelSize,xLabel:state.plots[0].xLabel,yLabel:state.plots[0].yLabel,legendPosition:state.legendPosition,legendPoint:state.legendPoint,legendSize:state.legendSize,showLegend:state.showLegend,showMarkers:state.showMarkers,backgroundColor:state.backgroundColor,backgroundOpacity:state.backgroundOpacity,frameFormat:$('data-frame-format').value,exportFormat:$('data-export-format').value,exportResolution:state.figureHeight,exportFps:Number($('data-export-fps').value)};
     $('data-project-name').value=await saveProject(name,project);feedback(`Graph project saved to projects/${name}.json.`);
     }catch(error){feedback(`Could not save graph project: ${error.message}`,true);}finally{savingProject=false;updateProjectControls();}
   });
   async function loadDataProject(file,name){
     try{
       const p=JSON.parse(await file.text());
-      if(p.type!=='flightroom-data'||p.version!==1||!Array.isArray(p.series)||!Number.isFinite(p.windowSeconds)||p.windowSeconds<.01||!Number.isFinite(p.threshold)||p.threshold<.1||p.threshold>.95||!Number.isFinite(p.legendSize)||p.legendSize<10||p.legendSize>36||!['top-left','top-right','bottom-left','bottom-right','custom'].includes(p.legendPosition)||typeof p.title!=='string'||p.title.length>120)throw new Error('Invalid graph project settings.');
+      if(p.type!=='flightroom-data'||![1,2].includes(p.version)||!Array.isArray(p.series)||!Number.isFinite(p.windowSeconds)||p.windowSeconds<.01||!Number.isFinite(p.threshold)||p.threshold<.1||p.threshold>.95||!Number.isFinite(p.legendSize)||p.legendSize<10||p.legendSize>36||!['top-left','top-right','bottom-left','bottom-right','custom'].includes(p.legendPosition)||typeof p.title!=='string'||p.title.length>120)throw new Error('Invalid graph project settings.');
       if((p.titleAlign!==undefined&&!['left','center','right'].includes(p.titleAlign))||(p.titleSize!==undefined&&(!Number.isInteger(p.titleSize)||p.titleSize<10||p.titleSize>48))||(p.labelSize!==undefined&&(!Number.isInteger(p.labelSize)||p.labelSize<10||p.labelSize>36)))throw new Error('Invalid chart text settings.');
       if((p.backgroundColor!==undefined && (typeof p.backgroundColor!=='string'||!/^#[0-9a-f]{6}$/i.test(p.backgroundColor))) || (p.backgroundOpacity!==undefined && (!Number.isFinite(p.backgroundOpacity)||p.backgroundOpacity<0||p.backgroundOpacity>1)))throw new Error('Invalid background settings.');
       if(p.legendPoint!==null && (!p.legendPoint || !Number.isFinite(p.legendPoint.x)||!Number.isFinite(p.legendPoint.y)||p.legendPoint.x<0||p.legendPoint.x>1||p.legendPoint.y<0||p.legendPoint.y>1))throw new Error('Invalid legend position.');
@@ -342,13 +375,15 @@ export function initDataPanel(onExportState=()=>{}) {
       const figureWidth=p.figureWidth ?? (p.frameFormat==='4:3'?oldHeight*4/3:oldHeight*16/9),figureHeight=p.figureHeight ?? oldHeight;
       if(!validDataFigureSize(figureWidth,figureHeight))throw new Error('Invalid figure dimensions.');
       if(p.legendPosition==='custom'&&p.legendPoint){const h=1280*figureHeight/figureWidth;figureLayout(1280,h,plots,p.layout??'vertical',{labelSize:p.labelSize ?? 10}).forEach((layout,index)=>{if(savedPlots[index].legend)return;const area=layout.plot;plots[index].legend.point={x:clamp((p.legendPoint.x*1280-area.left)/(area.right-area.left),0,1),y:clamp((p.legendPoint.y*h-area.top)/(area.bottom-area.top),0,1)};});}
-      const oldSources=new Map(),series=p.series.map(s=>{
-        if(!s||![s.source,s.name,s.label].every(v=>typeof v==='string'&&v.length<=500)||!/^#[0-9a-f]{6}$/i.test(s.color)||!['solid','dashed','dotted'].includes(s.style)||!Number.isFinite(s.width)||s.width<.5||s.width>8||!Array.isArray(s.times)||!Array.isArray(s.values)||s.times.length<2||s.values.length!==s.times.length||s.times.some((t,i)=>!Number.isFinite(t)||(i&&t<=s.times[i-1]))||s.values.some(v=>v!==null&&!Number.isFinite(v)))throw new Error('Invalid graph series.');
+      const savedSeries=p.series.map(s=>{
+        if(!s||typeof s.label!=='string'||s.label.length>500||!/^#[0-9a-f]{6}$/i.test(s.color)||!['solid','dashed','dotted'].includes(s.style)||!Number.isFinite(s.width)||s.width<.5||s.width>8)throw new Error('Invalid graph series.');
         if(s.sourceId!==undefined&&(typeof s.sourceId!=='string'||!s.sourceId))throw new Error('Invalid CSV source.');
-        let sourceId=s.sourceId;if(!sourceId){const matches=oldSources.get(s.source)??[],match=matches.find(item=>item.times.length===s.times.length&&item.times.every((time,i)=>time===s.times[i]));sourceId=match?.id??makeId();if(!match){matches.push({id:sourceId,times:s.times});oldSources.set(s.source,matches);}}
+        if(p.version===1&&(![s.source,s.name].every(v=>typeof v==='string'&&v.length<=500)||!Array.isArray(s.times)||!Array.isArray(s.values)||s.times.length<2||s.values.length!==s.times.length||s.times.some((t,i)=>!Number.isFinite(t)||(i&&t<=s.times[i-1]))||s.values.some(v=>v!==null&&!Number.isFinite(v))))throw new Error('Invalid graph series.');
         const plotId=s.plotId ?? plots[0].id;if(!plotIds.has(plotId))throw new Error('A series refers to a missing subplot.');
-        return {id:makeId(),sourceId,plotId,source:s.source,name:s.name,label:s.label,times:s.times,values:s.values,color:s.color,style:s.style,width:s.width,visible:s.visible!==false};
+        return {...s,plotId,visible:s.visible!==false};
       });
+      const library=p.version===1?migrateLegacySeries(savedSeries,makeId):{sources:p.sources,series:restoreLibrarySeries(p.sources,savedSeries,makeId)};
+      const {sources,series}=library;
       // Convert projects saved with the earlier time-based stop to the
       // equivalent position, preserving their appearance as they scroll.
       const start=series.length?Math.min(...series.map(s=>s.times[0])):0,end=series.length?Math.max(...series.map(s=>s.times.at(-1))):0;
@@ -361,13 +396,13 @@ export function initDataPanel(onExportState=()=>{}) {
         }
         return {...item,anchor};
       });
-      pause();importMessages.clear();collapsedSeries.clear();if(p.layout==='rows'||p.layout==='columns')plots.sort((a,b)=>a.group-b.group);Object.assign(state,{series,plots,layout:p.layout??'vertical',texts:migratedTexts,windowSeconds:p.windowSeconds,threshold:p.threshold,title:p.title,titleAlign:p.titleAlign ?? 'left',titleSize:p.titleSize ?? 18,labelSize:p.labelSize ?? 10,legendPosition:p.legendPosition,legendPoint:p.legendPoint,legendSize:p.legendSize,showLegend:p.showLegend!==false,showMarkers:p.showMarkers!==false,backgroundColor:p.backgroundColor ?? '#ffffff',backgroundOpacity:p.backgroundOpacity ?? 1,current:Number.isFinite(p.current)?p.current:(series[0]?.times[0]??0)});
-      $('data-export-format').value=['webm','webm-alpha','prores-4444'].includes(p.exportFormat)?p.exportFormat:'mp4';$('data-export-fps').value=[15,24,30].includes(p.exportFps)?String(p.exportFps):'30';syncFields();resizeFigure(figureWidth,figureHeight);bounds();renderPlots();renderSeries();resetTextForm();renderTexts();summary();$('data-project-name').value=name??projectNameFromFile(file,p.projectName);feedback('Graph project loaded.');
+      pause();collapsedSeries.clear();expandedSources.clear();for(const source of sources)expandedSources.add(source.sourceId);if(p.layout==='rows'||p.layout==='columns')plots.sort((a,b)=>a.group-b.group);Object.assign(state,{sources,series,plots,layout:p.layout??'vertical',texts:migratedTexts,windowSeconds:p.windowSeconds,threshold:p.threshold,title:p.title,titleAlign:p.titleAlign ?? 'left',titleSize:p.titleSize ?? 18,labelSize:p.labelSize ?? 10,legendPosition:p.legendPosition,legendPoint:p.legendPoint,legendSize:p.legendSize,showLegend:p.showLegend!==false,showMarkers:p.showMarkers!==false,backgroundColor:p.backgroundColor ?? '#ffffff',backgroundOpacity:p.backgroundOpacity ?? 1,current:Number.isFinite(p.current)?p.current:(series[0]?.times[0]??0)});
+      $('data-export-format').value=['webm','webm-alpha','prores-4444'].includes(p.exportFormat)?p.exportFormat:'mp4';$('data-export-fps').value=[15,24,30].includes(p.exportFps)?String(p.exportFps):'30';syncFields();resizeFigure(figureWidth,figureHeight);bounds();renderPlots();renderLibrary();renderSeries();resetTextForm();renderTexts();summary();$('data-project-name').value=name??projectNameFromFile(file,p.projectName);feedback('Graph project loaded.');
     }catch(error){feedback(`Could not load graph project: ${error.message}`,true);}
   }
   async function openDataProject(getFile,name){if(state.exporting||loadingProject||savingProject)return;if(pendingImports)return feedback('Wait for data loading to finish before opening a project.',true);loadingProject=true;updateProjectControls();try{await loadDataProject(await getFile(),name);}catch(error){feedback(`Could not open graph project: ${error.message}`,true);}finally{loadingProject=false;updateProjectControls();}}
   $('data-project-input').addEventListener('change',async event=>{const file=event.target.files[0];if(file)await openDataProject(()=>file);event.target.value='';});
   dataProjectLibrary=setupProjectLibrary({select:$('data-project-library'),button:$('data-open-saved-project'),type:'flightroom-data',onOpen:name=>openDataProject(()=>openProject(name),name)});
-  syncFields();resizeFigure(state.figureWidth,state.figureHeight);bounds();renderPlots();renderSeries();refreshTextPlots();renderTexts();syncAnnotationForm();summary();
+  syncFields();resizeFigure(state.figureWidth,state.figureHeight);bounds();renderPlots();renderLibrary();renderSeries();refreshTextPlots();renderTexts();syncAnnotationForm();summary();
   return {pause,redraw,isExporting:()=>state.exporting};
 }

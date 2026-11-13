@@ -64,7 +64,7 @@ export function drawDataChart(canvas,state,time,{opaque=false,ranges=null}={}) {
       const anchor=item.anchor,initialWindow=anchor&&(anchor.mode==='attach'||anchor.detachPercent!=null)?dataWindow(state.start,Math.max(state.start,anchor.time+anchor.offset),state.windowSeconds,state.threshold,state.end):window;
       const reattachWindow=anchor?.reattachTime!=null&&time>=anchor.reattachTime?dataWindow(state.start,anchor.reattachTime,state.windowSeconds,state.threshold,state.end):window;
       let bounds=null;if(item.type!=='line'){ctx.font=`600 ${item.size*1280/(state.figureWidth ?? canvas.width)}px sans-serif`;ctx.textAlign=item.align??'left';bounds=measurePlotLabelBounds(ctx,item.text);}
-      const position=annotationPosition(item,time,window,state.series,initialWindow,reattachWindow,bounds?{leftPadding:(bounds.right+1)/plotWidth,rightPadding:(bounds.left+1)/plotWidth,allowFuture:anchor?.mode!=='attach'}:undefined);if(position===null)continue;
+      const position=annotationPosition(item,time,window,state.sources??state.series,initialWindow,reattachWindow,bounds?{leftPadding:(bounds.right+1)/plotWidth,rightPadding:(bounds.left+1)/plotWidth,allowFuture:anchor?.mode!=='attach'}:undefined);if(position===null)continue;
       const px=plot.left+plotWidth*position;
       if(item.type==='line'){
         ctx.strokeStyle=item.color;ctx.lineWidth=item.width;ctx.setLineDash(item.style==='dashed'?[12,8]:item.style==='dotted'?[2,7]:[]);ctx.beginPath();ctx.moveTo(px,plot.top);ctx.lineTo(px,plot.bottom);ctx.stroke();ctx.setLineDash([]);
